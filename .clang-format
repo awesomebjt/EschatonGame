@@ -1,0 +1,37 @@
+# Eschaton clang-format configuration
+# Run: clang-format -i src/**/*.cpp src/**/*.h
+
+BasedOnStyle:          LLVM
+IndentWidth:           4
+TabWidth:              4
+UseTab:                Never
+ColumnLimit:           100
+
+# Braces
+BreakBeforeBraces:     Allman
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: false
+
+# Includes
+SortIncludes:          CaseSensitive
+IncludeBlocks:         Regroup
+IncludeCategories:
+  # Project headers first
+  - Regex:    '^"'
+    Priority: 1
+  # Third-party / system headers second
+  - Regex:    '^<'
+    Priority: 2
+
+# Spacing
+SpacesInParentheses:   false
+SpaceAfterCStyleCast:  false
+PointerAlignment:      Left   # int* p, not int *p
+
+# Alignment
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: false
+
+# Misc
+Cpp11BracedListStyle:  true
+Standard:              c++17
