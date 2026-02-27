@@ -60,7 +60,7 @@ FetchContent_MakeAvailable(SDL3)
 # bgfx.cmake wraps bgfx + bx + bimg and exposes them as CMake targets.
 # bgfx, bx, and bimg are included as git submodules inside the wrapper repo.
 set(BGFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BGFX_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
+set(BGFX_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)   # shaderc required for shader compilation
 set(BGFX_INSTALL        OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
@@ -72,11 +72,59 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(bgfx_cmake)
 
+# bgfxToolUtils.cmake is not auto-included via FetchContent; bring it in
+# manually so bgfx_compile_shaders() and friends are available.
+include(${bgfx_cmake_SOURCE_DIR}/cmake/bgfxToolUtils.cmake)
+
+# Point shaderc at the bgfx shader common headers (bgfx_shader.sh, etc.)
+set(BGFX_SHADER_INCLUDE_PATH "${bgfx_cmake_SOURCE_DIR}/bgfx/src"
+    CACHE STRING "bgfx shader include directory" FORCE)
+
+# --- cgltf (single-header GLB/glTF parser) ----------------------------------
+FetchContent_Declare(
+    cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG        v1.14
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(cgltf)
+
+# ---------------------------------------------------------------------------
+# Shader compilation
+# ---------------------------------------------------------------------------
+set(SHADER_OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders)
+
+bgfx_compile_shaders(
+    TYPE        VERTEX
+    SHADERS     ${CMAKE_SOURCE_DIR}/shaders/vs_mesh.sc
+    VARYING_DEF ${CMAKE_SOURCE_DIR}/shaders/varying.def.sc
+    OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
+    OUT_FILES_VAR VS_OUTPUT_FILES
+)
+
+bgfx_compile_shaders(
+    TYPE        FRAGMENT
+    SHADERS     ${CMAKE_SOURCE_DIR}/shaders/fs_mesh.sc
+    VARYING_DEF ${CMAKE_SOURCE_DIR}/shaders/varying.def.sc
+    OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
+    OUT_FILES_VAR FS_OUTPUT_FILES
+)
+
+add_custom_target(compile_shaders ALL DEPENDS ${VS_OUTPUT_FILES} ${FS_OUTPUT_FILES})
+
 # ---------------------------------------------------------------------------
 # Executable
 # ---------------------------------------------------------------------------
 add_executable(eschaton
     src/main.cpp
+    src/cgltf_impl.cpp
+)
+
+add_dependencies(eschaton compile_shaders)
+
+target_compile_definitions(eschaton PRIVATE
+    SHADER_DIR="${SHADER_OUTPUT_DIR}"
+    ASSETS_DIR="${CMAKE_SOURCE_DIR}/src"
 )
 
 target_compile_options(eschaton PRIVATE
@@ -99,7 +147,16 @@ target_link_libraries(eschaton PRIVATE
 
 target_include_directories(eschaton PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${cgltf_SOURCE_DIR}
 )
+
+# Suppress warnings from the cgltf implementation translation unit;
+# it is third-party code and not subject to project warning policy.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(src/cgltf_impl.cpp PROPERTIES COMPILE_FLAGS "-w")
+elseif(MSVC)
+    set_source_files_properties(src/cgltf_impl.cpp PROPERTIES COMPILE_FLAGS "/w")
+endif()
 
 # ---------------------------------------------------------------------------
 # Install (optional, for packaging later)

@@ -8,7 +8,8 @@
       "Bash(python tools/generate_tilemap.py:*)",
       "Bash(python:*)",
       "Bash(timeout:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(./_deps/bgfx_cmake-build/cmake/bgfx/shaderc:*)"
     ]
   }
 }
