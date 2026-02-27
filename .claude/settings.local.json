@@ -6,7 +6,9 @@
       "Bash(python3:*)",
       "Bash(pip3 install:*)",
       "Bash(python tools/generate_tilemap.py:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(timeout:*)",
+      "Bash(echo:*)"
     ]
   }
 }
