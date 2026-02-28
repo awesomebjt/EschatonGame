@@ -89,6 +89,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cgltf)
 
+# --- stb (stb_image for texture decoding) -----------------------------------
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(stb)
+
 # ---------------------------------------------------------------------------
 # Shader compilation
 # ---------------------------------------------------------------------------
@@ -118,6 +127,7 @@ add_custom_target(compile_shaders ALL DEPENDS ${VS_OUTPUT_FILES} ${FS_OUTPUT_FIL
 add_executable(eschaton
     src/main.cpp
     src/cgltf_impl.cpp
+    src/stb_image_impl.cpp
 )
 
 add_dependencies(eschaton compile_shaders)
@@ -148,14 +158,15 @@ target_link_libraries(eschaton PRIVATE
 target_include_directories(eschaton PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${cgltf_SOURCE_DIR}
+    ${stb_SOURCE_DIR}
 )
 
 # Suppress warnings from the cgltf implementation translation unit;
 # it is third-party code and not subject to project warning policy.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(src/cgltf_impl.cpp PROPERTIES COMPILE_FLAGS "-w")
+    set_source_files_properties(src/cgltf_impl.cpp src/stb_image_impl.cpp PROPERTIES COMPILE_FLAGS "-w")
 elseif(MSVC)
-    set_source_files_properties(src/cgltf_impl.cpp PROPERTIES COMPILE_FLAGS "/w")
+    set_source_files_properties(src/cgltf_impl.cpp src/stb_image_impl.cpp PROPERTIES COMPILE_FLAGS "/w")
 endif()
 
 # ---------------------------------------------------------------------------

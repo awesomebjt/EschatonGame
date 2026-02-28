@@ -8,6 +8,7 @@
 #include <entt/entt.hpp>
 
 #include "cgltf.h"
+#include "stb_image.h"
 
 static constexpr uint32_t k_width  = 1280;
 static constexpr uint32_t k_height =  720;
@@ -29,14 +30,16 @@ struct Primitive
 {
     bgfx::VertexBufferHandle vbh         = BGFX_INVALID_HANDLE;
     bgfx::IndexBufferHandle  ibh         = BGFX_INVALID_HANDLE;
+    bgfx::TextureHandle      tex         = BGFX_INVALID_HANDLE;
     uint32_t                 num_indices = 0;
 };
 
 // Scene state — created once on first Game entry, destroyed on shutdown.
-static bgfx::ProgramHandle    g_program    = BGFX_INVALID_HANDLE;
-static bgfx::UniformHandle    g_u_ambient  = BGFX_INVALID_HANDLE;
+static bgfx::ProgramHandle    g_program       = BGFX_INVALID_HANDLE;
+static bgfx::UniformHandle    g_s_texColor    = BGFX_INVALID_HANDLE;
+static bgfx::TextureHandle    g_white_tex     = BGFX_INVALID_HANDLE;
 static std::vector<Primitive> g_primitives;
-static bool                   g_scene_loaded = false;
+static bool                   g_scene_loaded  = false;
 
 // -----------------------------------------------------------------------
 // Shader loading helpers
@@ -88,6 +91,38 @@ static bgfx::ShaderHandle load_shader_binary(const char* sc_filename)
 // GLB scene loading
 // -----------------------------------------------------------------------
 
+// Decode an embedded glTF image into a bgfx texture.
+static bgfx::TextureHandle load_gltf_texture(const cgltf_image* image)
+{
+    if (!image || !image->buffer_view || !image->buffer_view->buffer)
+        return BGFX_INVALID_HANDLE;
+
+    const uint8_t* raw = static_cast<const uint8_t*>(image->buffer_view->buffer->data)
+                       + image->buffer_view->offset;
+    const int raw_len = static_cast<int>(image->buffer_view->size);
+
+    int w, h, channels;
+    uint8_t* pixels = stbi_load_from_memory(raw, raw_len, &w, &h, &channels, 4);
+    if (!pixels)
+    {
+        fprintf(stderr, "load_gltf_texture: stbi decode failed\n");
+        return BGFX_INVALID_HANDLE;
+    }
+
+    const uint32_t size = static_cast<uint32_t>(w * h * 4);
+    const bgfx::Memory* mem = bgfx::copy(pixels, size);
+    stbi_image_free(pixels);
+
+    bgfx::TextureHandle tex = bgfx::createTexture2D(
+        static_cast<uint16_t>(w), static_cast<uint16_t>(h),
+        false, 1, bgfx::TextureFormat::RGBA8, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP,
+        mem);
+
+    fprintf(stderr, "load_gltf_texture: %dx%d (%s)\n", w, h,
+            image->name ? image->name : "unnamed");
+    return tex;
+}
+
 static bool load_scene()
 {
     static const char* glb_path = ASSETS_DIR "/cylinder1.glb";
@@ -110,7 +145,8 @@ static bool load_scene()
 
     bgfx::VertexLayout layout;
     layout.begin()
-          .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+          .add(bgfx::Attrib::Position,  3, bgfx::AttribType::Float)
+          .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
           .end();
 
     for (cgltf_size mi = 0; mi < data->meshes_count; ++mi)
@@ -122,15 +158,16 @@ static bool load_scene()
             if (prim.type != cgltf_primitive_type_triangles || !prim.indices)
                 continue;
 
-            // Find the POSITION accessor.
+            // Find POSITION and TEXCOORD_0 accessors.
             const cgltf_accessor* pos_acc = nullptr;
+            const cgltf_accessor* uv_acc  = nullptr;
             for (cgltf_size ai = 0; ai < prim.attributes_count; ++ai)
             {
                 if (prim.attributes[ai].type == cgltf_attribute_type_position)
-                {
                     pos_acc = prim.attributes[ai].data;
-                    break;
-                }
+                else if (prim.attributes[ai].type == cgltf_attribute_type_texcoord
+                         && prim.attributes[ai].index == 0)
+                    uv_acc = prim.attributes[ai].data;
             }
             if (!pos_acc)
                 continue;
@@ -139,11 +176,22 @@ static bool load_scene()
             const uint32_t num_idx   = static_cast<uint32_t>(prim.indices->count);
             const bool     idx32     = (num_verts > 65535);
 
-            // Upload vertex positions.
-            const bgfx::Memory* vb_mem = bgfx::alloc(num_verts * 3 * sizeof(float));
+            // Interleave position (3 floats) + texcoord (2 floats) per vertex.
+            const uint32_t floats_per_vert = 5;
+            const bgfx::Memory* vb_mem = bgfx::alloc(num_verts * floats_per_vert * sizeof(float));
             auto* verts = reinterpret_cast<float*>(vb_mem->data);
             for (uint32_t v = 0; v < num_verts; ++v)
-                cgltf_accessor_read_float(pos_acc, v, verts + v * 3, 3);
+            {
+                float* dst = verts + v * floats_per_vert;
+                cgltf_accessor_read_float(pos_acc, v, dst, 3);
+                if (uv_acc)
+                    cgltf_accessor_read_float(uv_acc, v, dst + 3, 2);
+                else
+                {
+                    dst[3] = 0.0f;
+                    dst[4] = 0.0f;
+                }
+            }
 
             // Upload indices (16-bit when possible to save bandwidth).
             const uint32_t        idx_stride = idx32 ? 4u : 2u;
@@ -161,9 +209,21 @@ static bool load_scene()
                     idx[i] = static_cast<uint16_t>(cgltf_accessor_read_index(prim.indices, i));
             }
 
+            // Load texture from material's base color, if available.
+            bgfx::TextureHandle tex = BGFX_INVALID_HANDLE;
+            if (prim.material
+                && prim.material->has_pbr_metallic_roughness
+                && prim.material->pbr_metallic_roughness.base_color_texture.texture
+                && prim.material->pbr_metallic_roughness.base_color_texture.texture->image)
+            {
+                tex = load_gltf_texture(
+                    prim.material->pbr_metallic_roughness.base_color_texture.texture->image);
+            }
+
             Primitive p;
             p.vbh         = bgfx::createVertexBuffer(vb_mem, layout);
             p.ibh         = bgfx::createIndexBuffer(ib_mem, idx32 ? BGFX_BUFFER_INDEX32 : 0);
+            p.tex         = tex;
             p.num_indices = num_idx;
             g_primitives.push_back(p);
         }
@@ -187,8 +247,13 @@ static bool load_scene()
         return false;
     }
 
-    g_program   = bgfx::createProgram(vs, fs, /*destroyShaders=*/true);
-    g_u_ambient = bgfx::createUniform("u_ambient", bgfx::UniformType::Vec4);
+    g_program    = bgfx::createProgram(vs, fs, /*destroyShaders=*/true);
+    g_s_texColor = bgfx::createUniform("s_texColor", bgfx::UniformType::Sampler);
+
+    // 1x1 white fallback texture for primitives without materials.
+    const uint32_t white = 0xFFFFFFFF;
+    g_white_tex = bgfx::createTexture2D(1, 1, false, 1, bgfx::TextureFormat::RGBA8, 0,
+                                        bgfx::copy(&white, 4));
 
     fprintf(stderr, "load_scene: loaded %zu primitive(s) from %s\n",
             g_primitives.size(), glb_path);
@@ -201,29 +266,42 @@ static bool load_scene()
 
 static void render_scene()
 {
-    // Camera: sit at the cylinder's geometric centre, looking down the +Z axis
-    // (the long axis of the cylinder as exported from Blender).
+    // Camera: sit at the cylinder's geometric centre, rotating slowly around Y.
     float view[16];
     float proj[16];
 
-    const bx::Vec3 eye{0.0f, 0.0f, 0.0f};
-    const bx::Vec3 at {0.0f, 0.0f, 1.0f};
+    // 5 degrees per second, converted to radians.
+    const float deg_per_sec = 5.0f;
+    const float angle = bx::toRad(deg_per_sec) * (SDL_GetTicks() / 1000.0f);
+
+    const bx::Vec3 eye{0.0f, -3995.0f, 0.0f};
+    const bx::Vec3 at {
+        bx::sin(angle),
+        -3995.0f,
+        bx::cos(angle)
+    };
     const bx::Vec3 up {0.0f, 1.0f, 0.0f};
     bx::mtxLookAt(view, eye, at, up);
 
     const float aspect = static_cast<float>(k_width) / static_cast<float>(k_height);
-    bx::mtxProj(proj, 70.0f, aspect, 0.05f, 1000.0f,
+    bx::mtxProj(proj, 70.0f, aspect, 1.0f, 100000.0f,
                 bgfx::getCaps()->homogeneousDepth);
 
     // setViewTransform is per-view and persists for all draws to view 0 this frame.
     bgfx::setViewTransform(0, view, proj);
 
-    // Ambient-only cool white light — no shading, just a flat interior colour.
-    const float ambient[4] = {0.65f, 0.65f, 0.70f, 1.0f};
-
-    // Identity model transform: GLB is already at world origin.
+    // Scale the GLB up by 1000×, rotate 90° around X to lay the cylinder
+    // flat (long axis along Z), then rotate 90° around Y for alignment.
+    float scale[16];
+    float rotX[16];
+    float rotY[16];
+    float tmp[16];
     float model[16];
-    bx::mtxIdentity(model);
+    bx::mtxScale(scale, 1000.0f, 1000.0f, 1000.0f);
+    bx::mtxRotateX(rotX, bx::kPiHalf);
+    bx::mtxRotateY(rotY, bx::kPiHalf);
+    bx::mtxMul(tmp, scale, rotX);
+    bx::mtxMul(model, tmp, rotY);
 
     // Disable backface culling — we are inside the cylinder, so its faces
     // appear with reversed winding from the camera's perspective.
@@ -240,7 +318,8 @@ static void render_scene()
         bgfx::setVertexBuffer(0, prim.vbh);
         bgfx::setIndexBuffer(prim.ibh);
         bgfx::setState(draw_state);
-        bgfx::setUniform(g_u_ambient, ambient);
+        bgfx::setTexture(0, g_s_texColor,
+                         bgfx::isValid(prim.tex) ? prim.tex : g_white_tex);
         bgfx::submit(0, g_program);
     }
 }
@@ -255,13 +334,16 @@ static void free_scene()
     {
         bgfx::destroy(p.vbh);
         bgfx::destroy(p.ibh);
+        if (bgfx::isValid(p.tex)) bgfx::destroy(p.tex);
     }
     g_primitives.clear();
 
-    if (bgfx::isValid(g_u_ambient)) bgfx::destroy(g_u_ambient);
-    if (bgfx::isValid(g_program))   bgfx::destroy(g_program);
+    if (bgfx::isValid(g_s_texColor)) bgfx::destroy(g_s_texColor);
+    if (bgfx::isValid(g_white_tex))  bgfx::destroy(g_white_tex);
+    if (bgfx::isValid(g_program))    bgfx::destroy(g_program);
 
-    g_u_ambient    = BGFX_INVALID_HANDLE;
+    g_s_texColor   = BGFX_INVALID_HANDLE;
+    g_white_tex    = BGFX_INVALID_HANDLE;
     g_program      = BGFX_INVALID_HANDLE;
     g_scene_loaded = false;
 }
@@ -399,7 +481,7 @@ int main(int /*argc*/, char* /*argv*/[])
         // -- Render -------------------------------------------------
         bgfx::setViewClear(0,
             BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH,
-            0x000010ff,  // very dark blue-black
+            0x87CEEBff,  // sky-blue, matches fog color
             1.0f, 0);
         bgfx::setViewRect(0, 0, 0,
             static_cast<uint16_t>(k_width),

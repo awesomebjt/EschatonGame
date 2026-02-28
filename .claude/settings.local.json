@@ -9,7 +9,9 @@
       "Bash(python:*)",
       "Bash(timeout:*)",
       "Bash(echo:*)",
-      "Bash(./_deps/bgfx_cmake-build/cmake/bgfx/shaderc:*)"
+      "Bash(./_deps/bgfx_cmake-build/cmake/bgfx/shaderc:*)",
+      "Bash(gcc:*)",
+      "Bash(ls:*)"
     ]
   }
 }
