@@ -41,6 +41,14 @@ static bgfx::TextureHandle    g_white_tex     = BGFX_INVALID_HANDLE;
 static std::vector<Primitive> g_primitives;
 static bool                   g_scene_loaded  = false;
 
+// Camera orientation controlled by mouselook.
+// Yaw rotates left/right around the hub-pointing (Y) axis.
+// Pitch tilts up/down. Clamped to ±80° to keep the up vector stable.
+static float g_cam_yaw              = 0.0f;
+static float g_cam_pitch            = 0.0f;
+static constexpr float k_mouse_sens = 0.002f;          // radians per pixel
+static constexpr float k_pitch_max  = 1.3962634f;      // 80° in radians
+
 // -----------------------------------------------------------------------
 // Shader loading helpers
 // -----------------------------------------------------------------------
@@ -266,19 +274,21 @@ static bool load_scene()
 
 static void render_scene()
 {
-    // Camera: sit at the cylinder's geometric centre, rotating slowly around Y.
+    // Camera: sit at the cylinder's geometric centre.
+    // "Up" always points toward the hub (world +Y), ensuring the floor stays down.
+    // Look direction is derived from yaw (left/right) and pitch (up/down).
     float view[16];
     float proj[16];
 
-    // 5 degrees per second, converted to radians.
-    const float deg_per_sec = 5.0f;
-    const float angle = bx::toRad(deg_per_sec) * (SDL_GetTicks() / 1000.0f);
-
     const bx::Vec3 eye{0.0f, -3995.0f, 0.0f};
+    const float cp = bx::cos(g_cam_pitch);
+    const float sp = bx::sin(g_cam_pitch);
+    const float cy = bx::cos(g_cam_yaw);
+    const float sy = bx::sin(g_cam_yaw);
     const bx::Vec3 at {
-        bx::sin(angle),
-        -3995.0f,
-        bx::cos(angle)
+        eye.x + cp * sy,   // yaw=0 → looking along +Z; yaw=90° → +X
+        eye.y + sp,
+        eye.z + cp * cy
     };
     const bx::Vec3 up {0.0f, 1.0f, 0.0f};
     bx::mtxLookAt(view, eye, at, up);
@@ -458,19 +468,32 @@ int main(int /*argc*/, char* /*argv*/[])
                         else if (sc == SDL_SCANCODE_DOWN)
                             menu_sel = (menu_sel + 1) % k_menu_count;
                         else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER) {
-                            if (menu_sel == 0)
-                                screen = Screen::Game;   // PLAY
-                            else
+                            if (menu_sel == 0) {
+                                screen = Screen::Game;
+                                SDL_HideCursor();
+                                SDL_SetWindowMouseGrab(window, true);
+                            } else {
                                 running = false;         // QUIT
+                            }
                         }
                         break;
 
                     case Screen::Game:
                         // ESC suspends to menu without resetting game state.
-                        if (sc == SDL_SCANCODE_ESCAPE)
+                        if (sc == SDL_SCANCODE_ESCAPE) {
                             screen = Screen::Menu;
+                            SDL_SetWindowMouseGrab(window, false);
+                            SDL_ShowCursor();
+                        }
                         break;
                 }
+            }
+            // Mouselook: accumulate relative mouse motion while in-game.
+            if (ev.type == SDL_EVENT_MOUSE_MOTION && screen == Screen::Game) {
+                g_cam_yaw   -= ev.motion.xrel * k_mouse_sens;
+                g_cam_pitch -= ev.motion.yrel * k_mouse_sens;
+                if (g_cam_pitch >  k_pitch_max) g_cam_pitch =  k_pitch_max;
+                if (g_cam_pitch < -k_pitch_max) g_cam_pitch = -k_pitch_max;
             }
         }
 
