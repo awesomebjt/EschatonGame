@@ -490,7 +490,7 @@ int main(int /*argc*/, char* /*argv*/[])
             }
             // Mouselook: accumulate relative mouse motion while in-game.
             if (ev.type == SDL_EVENT_MOUSE_MOTION && screen == Screen::Game) {
-                g_cam_yaw   -= ev.motion.xrel * k_mouse_sens;
+                g_cam_yaw   += ev.motion.xrel * k_mouse_sens;
                 g_cam_pitch -= ev.motion.yrel * k_mouse_sens;
                 if (g_cam_pitch >  k_pitch_max) g_cam_pitch =  k_pitch_max;
                 if (g_cam_pitch < -k_pitch_max) g_cam_pitch = -k_pitch_max;
