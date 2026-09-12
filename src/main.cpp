@@ -42,12 +42,12 @@ static std::vector<Primitive> g_primitives;
 static bool                   g_scene_loaded  = false;
 
 // Camera orientation controlled by mouselook.
-// Yaw rotates left/right around the hub-pointing (Y) axis.
-// Pitch tilts up/down. Clamped to ±80° to keep the up vector stable.
+// Yaw rotates left/right around the hub-pointing (Y) axis and wraps freely.
+// Pitch tilts up/down, clamped to straight down / straight up.
 static float g_cam_yaw              = 0.0f;
 static float g_cam_pitch            = 0.0f;
 static constexpr float k_mouse_sens = 0.002f;          // radians per pixel
-static constexpr float k_pitch_max  = 1.3962634f;      // 80° in radians
+static constexpr float k_pitch_max  = bx::kPiHalf;
 
 // -----------------------------------------------------------------------
 // Shader loading helpers
@@ -290,7 +290,9 @@ static void render_scene()
         eye.y + sp,
         eye.z + cp * cy
     };
-    const bx::Vec3 up {0.0f, 1.0f, 0.0f};
+    // Up is world +Y tilted by pitch, so it stays perpendicular to the look
+    // direction and mtxLookAt doesn't degenerate at straight up/down.
+    const bx::Vec3 up {-sp * sy, cp, -sp * cy};
     bx::mtxLookAt(view, eye, at, up);
 
     const float aspect = static_cast<float>(k_width) / static_cast<float>(k_height);
@@ -492,6 +494,8 @@ int main(int /*argc*/, char* /*argv*/[])
             if (ev.type == SDL_EVENT_MOUSE_MOTION && screen == Screen::Game) {
                 g_cam_yaw   += ev.motion.xrel * k_mouse_sens;
                 g_cam_pitch -= ev.motion.yrel * k_mouse_sens;
+                if (g_cam_yaw >  bx::kPi) g_cam_yaw -= bx::kPi2;
+                if (g_cam_yaw < -bx::kPi) g_cam_yaw += bx::kPi2;
                 if (g_cam_pitch >  k_pitch_max) g_cam_pitch =  k_pitch_max;
                 if (g_cam_pitch < -k_pitch_max) g_cam_pitch = -k_pitch_max;
             }
