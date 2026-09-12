@@ -387,9 +387,9 @@ int main(int /*argc*/, char* /*argv*/[])
     // ---------------------------------------------------------------
     bgfx::Init init;
     init.type              = bgfx::RendererType::Count; // auto-select
-    init.resolution.width  = k_width;
-    init.resolution.height = k_height;
-    init.resolution.reset  = BGFX_RESET_VSYNC;
+    init.swapChain.width  = k_width;
+    init.swapChain.height = k_height;
+    init.reset             = BGFX_RESET_VSYNC;
 
     SDL_PropertiesID props = SDL_GetWindowProperties(window);
 
@@ -397,21 +397,21 @@ int main(int /*argc*/, char* /*argv*/[])
     if (SDL_strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0) {
         // Must set the handle type explicitly; bgfx defaults to Xlib otherwise.
         init.platformData.type = bgfx::NativeWindowHandleType::Wayland;
-        init.platformData.ndt =
+        init.swapChain.ndt =
             SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr);
-        init.platformData.nwh =
+        init.swapChain.nwh =
             SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr);
     } else {
-        init.platformData.ndt =
+        init.swapChain.ndt =
             SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr);
-        init.platformData.nwh = reinterpret_cast<void*>(
+        init.swapChain.nwh = reinterpret_cast<void*>(
             SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
     }
 #elif defined(SDL_PLATFORM_WINDOWS)
-    init.platformData.nwh =
+    init.swapChain.nwh =
         SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
 #elif defined(SDL_PLATFORM_MACOS)
-    init.platformData.nwh =
+    init.swapChain.nwh =
         SDL_GetPointerProperty(props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, nullptr);
 #endif
 
