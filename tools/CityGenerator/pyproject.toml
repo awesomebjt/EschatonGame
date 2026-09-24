@@ -1,0 +1,21 @@
+[project]
+name = "citygenerator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Benjamin J. Thompson", email = "realbjt@pm.me" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "blender>=1.4",
+    "bpy>=5.2.2",
+    "numpy>=2.5.3",
+]
+
+[project.scripts]
+citygenerator = "citygenerator:main"
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
