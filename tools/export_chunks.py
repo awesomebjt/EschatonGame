@@ -5,7 +5,11 @@ No Blender required: this imports paris_city directly and runs the generator in 
 CPython (needs only numpy).
 
     python3 export_chunks.py --region 20080 13500 25100 18500 --out world/
-    python3 export_chunks.py --all --tile 5020 4000 --out world/
+    python3 export_chunks.py --all --tile 5020 4000 --out world/ [--jobs N]
+
+--all runs tiles in parallel worker processes (default: one per CPU). The whole-map
+network (river, hubs, boulevards) is computed once in the parent and shared, and only
+the parent writes manifest.json and prototypes.bin, after every tile has finished.
 
 What it writes
 --------------
@@ -39,11 +43,15 @@ type has fixed dimensions, which is why the catalogue instances cleanly.
 """
 
 import argparse
+import contextlib
+import io
 import json
 import math
+import multiprocessing as mp
 import os
 import struct
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paris_city as pc
@@ -134,8 +142,10 @@ def instance_of(T, poly):
     return (ax + bx) / 2.0, (ay + by) / 2.0, rot
 
 
-def export_region(region, out_dir, write_protos=True):
-    r = pc.generate(region=region)
+def export_region(region, out_dir, network=None):
+    """Write one region's chunk files and return their manifest entries. Touches no
+    shared file, so regions can be exported concurrently."""
+    r = pc.generate(region=region, network=network)
     reg = r["region"]
     os.makedirs(out_dir, exist_ok=True)
     terrain, _, _, monuments, _ = pc.build_chunk_meshes(r, include_buildings=False)
@@ -178,10 +188,12 @@ def export_region(region, out_dir, write_protos=True):
                                vertices=nv, triangles=ni // 3,
                                buildings=len(binst), monuments=len(minst)))
 
-    if write_protos:
-        n = write_prototypes(os.path.join(out_dir, "prototypes.bin"))
-        print(f"  prototypes.bin: {n} meshes")
+    print(f"  {len(chunk_list)} chunks, {total / 1e6:.1f} MB, "
+          f"{sum(c['buildings'] for c in chunk_list)} building instances")
+    return chunk_list
 
+
+def write_manifest(out_dir, chunk_list):
     manifest_path = os.path.join(out_dir, "manifest.json")
     manifest = {}
     if os.path.exists(manifest_path):
@@ -210,12 +222,86 @@ def export_region(region, out_dir, write_protos=True):
                      for n, rr, pr, sh in pc.ROUNDABOUT_TYPES],
         vertex_stride=28,
     ))
-    manifest.setdefault("chunks", [])
-    have = {(c["i"], c["j"]) for c in manifest["chunks"]}
-    manifest["chunks"] += [c for c in chunk_list if (c["i"], c["j"]) not in have]
-    json.dump(manifest, open(manifest_path, "w"), indent=1)
-    print(f"  {len(chunk_list)} chunks, {total / 1e6:.1f} MB, "
-          f"{sum(c['buildings'] for c in chunk_list)} building instances")
+    # Freshly exported chunks replace their old entries (counts change when the
+    # generator does); chunks outside this export keep theirs. Sorted, because tiles
+    # finish in any order and the manifest should diff cleanly between runs.
+    chunks = {(c["i"], c["j"]): c for c in manifest.get("chunks", [])}
+    chunks.update({(c["i"], c["j"]): c for c in chunk_list})
+    manifest["chunks"] = [chunks[k] for k in sorted(chunks)]
+    # Write-then-rename so an interrupted export never leaves a truncated manifest.
+    tmp = manifest_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(manifest, f, indent=1)
+    os.replace(tmp, manifest_path)
+
+
+def export_and_index(region, out_dir, network=None):
+    chunk_list = export_region(region, out_dir, network)
+    n = write_prototypes(os.path.join(out_dir, "prototypes.bin"))
+    print(f"  prototypes.bin: {n} meshes")
+    write_manifest(out_dir, chunk_list)
+
+
+# Worker state: the shared network arrives once per process through the pool
+# initializer instead of being pickled with every task.
+_worker_network = None
+
+
+def _init_worker(network):
+    global _worker_network
+    _worker_network = network
+
+
+def _export_tile(job):
+    """Pool task. The generator narrates every pass; keep that out of the shared
+    terminal and hand it back only if the tile fails."""
+    key, region, out_dir = job
+    log = io.StringIO()
+    t0 = time.time()
+    try:
+        with contextlib.redirect_stdout(log):
+            chunk_list = export_region(region, out_dir, _worker_network)
+    except Exception as e:
+        return key, None, time.time() - t0, f"{log.getvalue()}{type(e).__name__}: {e}"
+    return key, chunk_list, time.time() - t0, None
+
+
+def export_all(tile, out_dir, jobs):
+    tw, th = tile
+    cols, rows = int(round(pc.MAP_W / tw)), int(round(pc.MAP_H / th))
+    os.makedirs(out_dir, exist_ok=True)
+    t0 = time.time()
+    network = pc.generate_network()
+    print(f"network ready in {time.time() - t0:.1f} s; "
+          f"{rows * cols} tiles on {jobs} processes")
+
+    tasks = [((rr, cc), (cc * tw, rr * th, (cc + 1) * tw, (rr + 1) * th), out_dir)
+             for rr in range(rows) for cc in range(cols)]
+    chunk_list, failed = [], []
+    with mp.get_context("spawn").Pool(jobs, initializer=_init_worker,
+                                      initargs=(network,)) as pool:
+        for done, (key, chunks, secs, err) in enumerate(
+                pool.imap_unordered(_export_tile, tasks), 1):
+            if err is not None:
+                failed.append(key)
+                print(f"[{done}/{len(tasks)}] tile {key[0]},{key[1]} FAILED after {secs:.0f} s\n"
+                      f"{err}", file=sys.stderr)
+                continue
+            chunk_list += chunks
+            print(f"[{done}/{len(tasks)}] tile {key[0]},{key[1]}: {len(chunks)} chunks, "
+                  f"{sum(c['buildings'] for c in chunks)} buildings, {secs:.0f} s")
+
+    if failed:
+        # Chunk files from the good tiles are on disk, but the manifest is left alone
+        # so it never claims a partial world is complete.
+        print(f"{len(failed)} tile(s) failed: {sorted(failed)}; manifest not written",
+              file=sys.stderr)
+        return False
+    n = write_prototypes(os.path.join(out_dir, "prototypes.bin"))
+    write_manifest(out_dir, chunk_list)
+    print(f"done: {len(chunk_list)} chunks, prototypes.bin {n} meshes, "
+          f"{time.time() - t0:.0f} s total")
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -225,16 +311,10 @@ if __name__ == "__main__":
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--tile", nargs=2, type=float, default=[5020.0, 4000.0])
     ap.add_argument("--out", default="world")
+    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
+                    help="worker processes for --all (default: one per CPU)")
     a = ap.parse_args()
     if a.all:
-        tw, th = a.tile
-        cols, rows = int(round(pc.MAP_W / tw)), int(round(pc.MAP_H / th))
-        first = True
-        for rr in range(rows):
-            for cc in range(cols):
-                print(f"[tile {rr},{cc}]")
-                export_region((cc * tw, rr * th, (cc + 1) * tw, (rr + 1) * th),
-                              a.out, write_protos=first)
-                first = False
+        sys.exit(0 if export_all(a.tile, a.out, max(1, a.jobs)) else 1)
     else:
-        export_region(tuple(a.region) if a.region else "river", a.out)
+        export_and_index(tuple(a.region) if a.region else "river", a.out)
