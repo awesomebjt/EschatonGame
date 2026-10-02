@@ -63,7 +63,7 @@ The "floor" is the **inner wall** of the cylinder. Gravity points radially outwa
 ### Interior Composition
 
 - **Urban zones** — Haussmann-style city: boulevards between monumental roundabouts, minor street grids, continuous block frontage
-- **Green zones** — 15% of city superblocks are parkland, plus a 1 km green border at each end of the cylinder, plus riverside parks
+- **Green zones** — 7.5% of city superblocks are parkland, plus a 1 km green border at each end of the cylinder, plus riverside parks
 - **Water features** — a single river making five helical laps of the circumference (lakes and canals not yet generated)
 - **Infrastructure** — bridges carrying boulevards over the river, quay streets along both banks, monument platforms at every roundabout
 
@@ -278,15 +278,15 @@ Do **not** create an EnTT entity per building. At ~375k buildings per cylinder t
 
 Generation order, each pass constraining the next:
 
-**1. River.** A helical centreline entering at one 25.1 km edge and leaving at the other, making exactly **5 laps** of the circumference (~183 km of channel). Width varies 50–100 m; where widest, a tapered island occupies the middle 50 m. Meanders are applied perpendicular to the helix direction, which matters — applied in X they would run parallel to the flow and be invisible at this drift angle.
+**1. River.** A helical centreline entering at one 25.1 km edge and leaving at the other, making exactly **5 laps** of the circumference (~183 km of channel). Width varies 50–300 m; where widest (over 270 m), a tapered island occupies the middle 50 m. Meanders are applied perpendicular to the helix direction, which matters — applied in X they would run parallel to the flow and be invisible at this drift angle. The short-wavelength meanders are damped where the river is wide, so no bend is tighter than the bank offset; otherwise the inner bank folds over itself.
 
-**2. Hubs.** Roundabout centres, minimum 500 m apart, each linked to up to 5 neighbours within 1 km. The hard constraint is that **no boulevard runs within 20° of a cardinal direction**, which rules out hexagonal packing — every hexagonal neighbourhood puts at least one neighbour in a forbidden wedge. The generator therefore starts from a **sheared lattice** whose basis vectors are chosen so that an integer combination equals exactly (25100, 0), making the layout tile in X, then random-walks the hubs, accepting only moves that preserve every constraint. Result on the default seed: 1,550 hubs, 94% with 5 links, the rest with 3 or 4.
+**2. Hubs.** Roundabout centres, minimum 707 m apart, each linked to up to 5 neighbours within 1,414 m (500 m / 1 km scaled by √2, half the density of earlier drafts). The hard constraint is that **no boulevard runs within 20° of a cardinal direction**, which rules out hexagonal packing — every hexagonal neighbourhood puts at least one neighbour in a forbidden wedge. The generator therefore starts from a **sheared lattice** whose basis vectors are chosen so that an integer combination equals exactly (25100, 0), making the layout tile in X, then random-walks the hubs, accepting only moves that preserve every constraint. Result on the default seed: 800 hubs, 89% with 5 links, the rest with 3 or 4.
 
-**3. Boulevards.** The k-nearest-neighbour graph over the hubs, bearing-filtered. Edges that would graze the river for more than 300 m are dropped (otherwise a road nearly parallel to the river becomes a kilometre-long viaduct). Hub count is trimmed to a multiple of 50 so roundabout ratios come out exact.
+**3. Boulevards.** The k-nearest-neighbour graph over the hubs, bearing-filtered. Edges that would graze the river for more than 900 m (3 × the widest river) are dropped (otherwise a road nearly parallel to the river becomes a kilometre-long viaduct). Hub count is trimmed to a multiple of 50 so roundabout ratios come out exact.
 
-**4. Superblocks.** The planar arrangement of boulevards plus the map border. **15%** of superblocks, chosen by a deterministic hash of their centroid, are set aside as parkland — no streets, no buildings, including on the boulevard frontage facing them.
+**4. Superblocks.** The planar arrangement of boulevards plus the map border. **7.5%** of superblocks, chosen by a deterministic hash of their centroid, are set aside as parkland — no streets, no buildings, including on the boulevard frontage facing them.
 
-**5. Minor streets.** Within each remaining superblock, streets fan out perpendicular from the longest boulevard at 98 m centreline pitch, then bend after at least 50 m to meet the far boulevard square-on. Streets never cross the river; they truncate at the quay. Quay streets run along both banks so the riverside gets frontage instead of dead ends.
+**5. Minor streets.** Within each remaining superblock, streets fan out perpendicular from the longest boulevard at 98 m centreline pitch, then bend after at least 50 m to meet the far boulevard square-on. Streets never cross the river; they stop at the quay and resume on the far bank. Quay streets run along both banks so the riverside gets frontage instead of dead ends. Superblocks over 120 ha (common beside the river, which hubs keep clear of) are first halved by a minor street across their long axis, recursively, since a single fan leaves most of an oversized block empty.
 
 **6. Buildings.** A frontage walk along every street side places buildings from the 20-type catalogue, greedily, with SAT collision against roads, roundabouts, the river, green zones and other buildings.
 
@@ -304,7 +304,7 @@ Generation order, each pass constraining the next:
 | Street pitch | 98 m centreline |
 | Building types | 20; footprints 5–100 m, depth ≤ 40 m, heights 20–40 m in 5 m steps |
 | Courtyards | any side over 60 m; 10 m wings; 2 m × 3 m street passage |
-| River | 5 laps, 50–100 m wide, islands in the middle 50 m at maximum width |
+| River | 5 laps, 50–300 m wide (mean ~180 m), islands in the middle 50 m where over 270 m wide |
 | Bridges | boulevards only; deck at 6 m with 80 m ramps |
 
 ### Roundabouts and Monuments
@@ -313,15 +313,15 @@ Three sizes in a fixed **31 : 17 : 2** ratio, which is why the hub count is forc
 
 | Size | Roadway radius | Platform radius | Monument | Count (default seed) |
 |---|---|---|---|---|
-| S | 45 m | 15 m | gold cylinder, r 1.5 m, h 5 m | 961 |
-| M | 70 m | 40 m | gold cylinder, r 3 m, h 10 m | 527 |
-| L | 100 m | 70 m | off-white drum r 65 m × 40 m + 65 m hemisphere (~106 m total) | 62 |
+| S | 45 m | 15 m | gold cylinder, r 1.5 m, h 5 m | 496 |
+| M | 70 m | 40 m | gold cylinder, r 3 m, h 10 m | 272 |
+| L | 100 m | 70 m | off-white drum r 65 m × 40 m + 65 m hemisphere (~106 m total) | 32 |
 
-Platform height is 1.5 m; monuments sit at z = 1.5. Large roundabouts require clearance from the river and are placed at least ~2.5 km apart, making the 62 domes the natural long-range landmark set for navigation inside the shell.
+Platform height is 1.5 m; monuments sit at z = 1.5. Large roundabouts require clearance from the river and are placed at least ~2.5 km apart, making the 32 domes the natural long-range landmark set for navigation inside the shell.
 
 ### Not Yet Generated
 
-The biome targets from earlier drafts (30% water, 20% park, 25% urban, 25% industrial) are **not** met by the current generator, which produces a single continuous city plus one river. Current coverage is roughly 24% green (15% reserved superblocks plus riverside and leftover parks), ~1% water, the rest urban.
+The biome targets from earlier drafts (30% water, 20% park, 25% urban, 25% industrial) are **not** met by the current generator, which produces a single continuous city plus one river. Current coverage is roughly 15% green (7.5% reserved superblocks plus riverside and leftover parks), ~4% water, the rest urban.
 
 Planned as later passes, on a coarse biome grid feeding the generator as a mask:
 
@@ -345,11 +345,11 @@ map_h = 32000
 [river]
 laps = 5
 width_min = 50
-width_max = 100
+width_max = 300
 meander_factor = 0.6
 
 [green]
-superblock_share = 0.15
+superblock_share = 0.075
 border_z = 1000
 
 [roundabouts]

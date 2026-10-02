@@ -424,9 +424,9 @@ load time — it's the same pass that already sorts by type.
 
 Three prototypes, same instancing path, keyed on `monument.size`:
 
-- **S** (961 of them): gold cylinder, radius 1.5 m, height 5 m, standing on a 15 m platform
-- **M** (527): gold cylinder, radius 3 m, height 10 m, on a 40 m platform
-- **L** (62): off-white drum, radius 65 m, 40 m tall, capped by a 65 m hemisphere — about
+- **S** (496 of them): gold cylinder, radius 1.5 m, height 5 m, standing on a 15 m platform
+- **M** (272): gold cylinder, radius 3 m, height 10 m, on a 40 m platform
+- **L** (32): off-white drum, radius 65 m, 40 m tall, capped by a 65 m hemisphere — about
   106 m overall, on a 70 m platform
 
 The large ones are at least ~2.5 km apart by construction, so they are the natural

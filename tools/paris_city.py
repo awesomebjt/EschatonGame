@@ -56,13 +56,15 @@ CHUNK_X = 502.0             # 25100 / 502 = 50 chunks, so chunks tile with the m
 CHUNK_Y = 500.0             # 32000 / 500 = 64 chunks
 
 # Hubs / boulevards
-HUB_MIN_DIST = 500.0
-HUB_NEAR_DIST = 1000.0
+# Hub spacing is 500 m / 1 km scaled by √2, which halves the roundabout density.
+# _lattice_basis's lattice integers are scaled to match.
+HUB_MIN_DIST = 707.0
+HUB_NEAR_DIST = 1414.0
 HUB_LINKS_WANTED = 5
 HUB_LINKS_MIN = 3           # soft floor: 3 or 4 links is acceptable
 CARDINAL_EXCLUSION = 20.0   # degrees
 HUB_SWEEPS = 14             # random-walk sweeps over all hubs (more = less lattice-like)
-HUB_JITTER = 55.0
+HUB_JITTER = 78.0
 
 # River
 RIVER_LAPS = 5              # complete laps around the cylinder between the two short edges
@@ -70,16 +72,16 @@ RIVER_START_X = 4000.0      # where it meets the y = 0 edge
 RIVER_END_X = 16000.0       # where it meets the y = MAP_H edge
 RIVER_END_TAPER = 3000.0    # meanders fade out over this much arc at each end
 RIVER_STEP = 20.0           # centreline sampling
-RIVER_W_MIN, RIVER_W_MAX = 50.0, 100.0
+RIVER_W_MIN, RIVER_W_MAX = 50.0, 300.0
 ISLAND_WIDTH = 50.0         # middle 50 m where the river is widest
-ISLAND_MIN_WIDTH = 90.0     # river width at which an island starts to appear
+ISLAND_MIN_WIDTH = 0.9 * RIVER_W_MAX   # river width at which an island starts to appear
 ISLAND_MIN_LENGTH = 120.0
 RIVER_SETBACK = 12.0        # quay: nothing is built within this of the bank
 QUAI_ROADS = True           # minor street following each bank (never crosses, only follows)
 QUAI_STEP = 40.0
 BRIDGE_HEIGHT = 6.0
 BRIDGE_RAMP = 80.0
-MAX_BRIDGE_SPAN = 300.0     # boulevards that would graze the river for longer are dropped
+MAX_BRIDGE_SPAN = 900.0     # 3 × the widest river; boulevards that would graze the river for longer are dropped
 
 # Roads
 MAJOR_WIDTH = 30.0
@@ -90,6 +92,7 @@ STREET_PITCH = BLOCK_DEPTH + MINOR_WIDTH
 MIN_BEND = 50.0
 MAX_BEND_ANGLE = 60.0
 STREET_END_MARGIN = 70.0
+SUPERBLOCK_SPLIT_AREA = 1.2e6   # m²; larger superblocks are halved by a minor street
 
 # Roundabouts / monuments
 #   name, roadway radius, platform radius, share out of ROUNDABOUT_MULTIPLE
@@ -105,7 +108,7 @@ MONUMENT_M = (3.0, 10.0)
 MONUMENT_L = (65.0, 40.0)   # off-white drum, plus a 65 m hemisphere on top (~105 m total)
 
 # Green zones
-GREEN_ZONE_SHARE = 0.15     # fraction of superblocks left entirely as parkland
+GREEN_ZONE_SHARE = 0.075    # fraction of superblocks left entirely as parkland
 
 # Buildings
 COURTYARD_THRESHOLD = 60.0
@@ -165,6 +168,17 @@ def unit(a):
 
 def poly_area(p):
     return 0.5 * sum(cross(p[i], p[(i + 1) % len(p)]) for i in range(len(p)))
+
+
+def point_in_poly(p, poly):
+    inside = False
+    n = len(poly)
+    for k in range(n):
+        ax, ay = poly[k]
+        bx, by = poly[(k + 1) % n]
+        if (ay > p[1]) != (by > p[1]) and p[0] < ax + (p[1] - ay) / (by - ay) * (bx - ax):
+            inside = not inside
+    return inside
 
 
 def bearing_ok(dx, dy):
@@ -282,7 +296,7 @@ class River:
     """Helical centreline: enters at (RIVER_START_X, 0), leaves at (RIVER_END_X, MAP_H),
     and makes exactly RIVER_LAPS crossings of the x seam on the way. Meanders are applied
     perpendicular to that base direction, so they read as meanders whatever the drift angle.
-    Width varies 50-100 m; where it is widest a tapered island takes the middle 50 m."""
+    Width varies 50-300 m; where it is widest a tapered island takes the middle 50 m."""
 
     def __init__(self, rng):
         drift = RIVER_LAPS * MAP_W + (RIVER_END_X - RIVER_START_X)
@@ -293,17 +307,31 @@ class River:
 
         env = np.clip(np.minimum(t, base_len - t) / RIVER_END_TAPER, 0.0, 1.0)
         env = env * env * (3 - 2 * env)                   # meanders vanish at both mouths
-        off = np.zeros_like(t)
-        for amp, lam in ((620.0, 7300.0), (260.0, 2600.0), (95.0, 880.0), (40.0, 360.0)):
-            off = off + amp * env * np.sin(2 * np.pi * t / lam + rng.uniform(0, 2 * np.pi))
-        xs = RIVER_START_X + ux * t + nx * off
-        ys = uy * t + ny * off
+        meanders = [(amp, lam, rng.uniform(0, 2 * np.pi))
+                    for amp, lam in ((620.0, 7300.0), (260.0, 2600.0), (95.0, 880.0), (40.0, 360.0))]
 
         w = np.zeros_like(t)
         for amp, lam in ((1.0, 5200.0), (0.55, 1700.0), (0.3, 640.0)):
             w = w + amp * np.sin(2 * np.pi * t / lam + rng.uniform(0, 2 * np.pi))
         w = (w - w.min()) / max(1e-6, float(w.max() - w.min()))
         w = RIVER_W_MIN + (RIVER_W_MAX - RIVER_W_MIN) * w
+
+        # A bank offset by more than the bend radius folds over itself (bow-tie water
+        # quads, holes in the occupancy raster). Where the river is wide, damp the short
+        # meanders so the worst-case curvature, every term peaking at once, stays under
+        # 1 / (half-width + setback + margin). Narrow stretches keep the full wiggle.
+        def kappa(terms):
+            return sum(amp * (2 * np.pi / lam) ** 2 for amp, lam, _ in terms)
+        long_m = [m for m in meanders if m[1] >= 2000.0]
+        short_m = [m for m in meanders if m[1] < 2000.0]
+        k_ok = 1.0 / (w / 2.0 + RIVER_SETBACK + 10.0)
+        damp = np.clip((k_ok - kappa(long_m)) / kappa(short_m), 0.0, 1.0)
+        off = np.zeros_like(t)
+        for amp, lam, ph in meanders:
+            a = amp * damp if lam < 2000.0 else amp
+            off = off + a * env * np.sin(2 * np.pi * t / lam + ph)
+        xs = RIVER_START_X + ux * t + nx * off
+        ys = uy * t + ny * off
 
         seg = np.hypot(np.diff(xs), np.diff(ys))          # resample at uniform arclength
         s = np.concatenate([[0.0], np.cumsum(seg)])
@@ -320,7 +348,9 @@ class River:
         tl = np.hypot(tx, ty)
         self.nx, self.ny = -ty / tl, tx / tl
 
-        self.cell = 250.0
+        # nearest() searches one cell around the query, so a cell must cover the widest
+        # half-width plus the farthest bank distance anyone asks about (~250 m).
+        self.cell = RIVER_W_MAX / 2.0 + 250.0
         self.ncx = int(math.ceil(MAP_W / self.cell))
         self.grid = {}
         for i, (px, py) in enumerate(zip(self.x % MAP_W, self.y)):
@@ -380,8 +410,8 @@ class River:
 def _lattice_basis(rng):
     """Bases whose integer span contains (MAP_W, 0), so the layout tiles in X."""
     for _ in range(200):
-        nn = rng.choice([18, 19, 20])
-        mm = rng.choice([25, 26, 27])
+        nn = rng.choice([13, 14])
+        mm = rng.choice([18, 19])
         L = 2 * MAP_W / (nn * (1 + math.sqrt(3)))
         d = math.sqrt(2) * nn * L / (2 * mm)
         e1 = (d / math.sqrt(2), -d / math.sqrt(2))
@@ -432,7 +462,7 @@ def generate_hubs(rng, river):
             seen.add(key)
             pts.append([q[0], q[1]])
 
-    ncx = int(round(MAP_W / 1000.0))
+    ncx = int(MAP_W // HUB_NEAR_DIST)    # cells at least one link long
     cw = MAP_W / ncx
     grid = {}
 
@@ -509,7 +539,7 @@ def water_span(river, a, b):
 
 
 def build_edges(hubs, banned=()):
-    ncx = int(round(MAP_W / 1000.0))
+    ncx = int(MAP_W // HUB_NEAR_DIST)    # cells at least one link long
     cw = MAP_W / ncx
     grid = {}
     for i, p in enumerate(hubs):
@@ -539,22 +569,42 @@ def finalize_network(hubs, river):
     """Cull unbridgeable boulevards and under-connected hubs, trim the hub count to a
     multiple of ROUNDABOUT_MULTIPLE, then size every roundabout. Shared by the generator
     and the whole-map preview so both see the same network."""
-    edges, counts, dropped = [], [], 0
-    for _ in range(6):
+    # Under-connected hubs are culled until none remain, and only then is the count
+    # trimmed. Trimming inside the cull loop wastes up to ROUNDABOUT_MULTIPLE - 1 hubs
+    # per pass, because each trim can leave a neighbour short and restart the cascade.
+    # Trim candidates are hubs whose loss leaves every neighbour at or above the floor,
+    # picked one at a time so two picks can't both draw down a shared neighbour.
+    while True:
         long_bridge = {e for e in build_edges(hubs)[0]
                        if water_span(river, *edge_segment(hubs, e)) > MAX_BRIDGE_SPAN}
-        dropped = len(long_bridge)
         edges, counts = build_edges(hubs, banned=long_bridge)
         drop = {i for i, c in enumerate(counts) if c < HUB_LINKS_MIN}
-        extra = (len(hubs) - len(drop)) % ROUNDABOUT_MULTIPLE
-        if extra:                       # least connected hubs go first
-            rank = sorted((c, round(hubs[i][0], 1), round(hubs[i][1], 1), i)
-                          for i, c in enumerate(counts) if i not in drop)
-            drop.update(t[3] for t in rank[:extra])
         if not drop:
-            break
+            extra = len(hubs) % ROUNDABOUT_MULTIPLE
+            if not extra:
+                break
+            adj = [[] for _ in hubs]
+            for a, b in edges:
+                adj[a].append(b)
+                adj[b].append(a)
+            left = list(counts)
+            rank = sorted((c, round(hubs[i][0], 1), round(hubs[i][1], 1), i)
+                          for i, c in enumerate(counts))
+            drop = set()
+            for *_, i in rank:
+                if len(drop) == extra:
+                    break
+                if any(left[j] <= HUB_LINKS_MIN for j in adj[i] if j not in drop):
+                    continue
+                drop.add(i)
+                for j in adj[i]:
+                    left[j] -= 1
+            for *_, i in rank:              # nothing safe left: fall back to weakest
+                if len(drop) == extra:
+                    break
+                drop.add(i)
         hubs = [h for i, h in enumerate(hubs) if i not in drop]
-    return hubs, edges, counts, assign_roundabout_sizes(hubs, river), dropped
+    return hubs, edges, counts, assign_roundabout_sizes(hubs, river), len(long_bridge)
 
 
 def assign_roundabout_sizes(hubs, river):
@@ -697,19 +747,8 @@ class GreenZones:
                     self.grid.setdefault((i, j), []).append(idx)
 
     def contains(self, p):
-        for idx in self.grid.get((int(p[0] // self.cell), int(p[1] // self.cell)), ()):
-            poly = self.polys[idx]
-            inside = False
-            n = len(poly)
-            for k in range(n):
-                ax, ay = poly[k]
-                bx, by = poly[(k + 1) % n]
-                if (ay > p[1]) != (by > p[1]) and \
-                        p[0] < ax + (p[1] - ay) / (by - ay) * (bx - ax):
-                    inside = not inside
-            if inside:
-                return True
-        return False
+        return any(point_in_poly(p, self.polys[idx])
+                   for idx in self.grid.get((int(p[0] // self.cell), int(p[1] // self.cell)), ()))
 
 
 def is_green_face(pts):
@@ -737,28 +776,40 @@ def segs_cross(a, b, c, d):
 
 
 def cut_at_obstacles(line, river, discs=()):
-    """Minor streets never bridge and never cross a roundabout: truncate them."""
-    def blocked(p):
-        if river.blocks(p):
-            return True
+    """Minor streets never bridge and never cross a roundabout: truncate them. A street
+    cut by the river resumes on the far bank (that piece starts at the quay), so land
+    beyond the river still gets streets. Returns the pieces, each a polyline."""
+    def in_disc(p):
         return any(math.hypot(wrapdx(p[0] - c[0]), p[1] - c[1]) < r for c, r in discs)
 
-    if blocked(line[0]):
-        return None
-    out = [line[0]]
+    if river.blocks(line[0]) or in_disc(line[0]):
+        return []
+    pieces, out = [], [line[0]]     # out is None while crossing the river
     for a, b in zip(line, line[1:]):
         L = math.dist(a, b)
         steps = max(1, int(L / 10.0))
         t = unit(sub(b, a))
         for k in range(1, steps + 1):
             p = add(a, mul(t, L * k / steps))
-            if blocked(p):
+            wet = river.blocks(p)
+            if out is not None and (wet or in_disc(p)):
                 hit = add(a, mul(t, max(0.0, L * (k - 1) / steps - 10.0)))
                 if math.dist(out[-1], hit) > 30.0:
                     out.append(hit)
-                return out if len(out) > 1 else None
-        out.append(b)
-    return out
+                if len(out) > 1:
+                    pieces.append(out)
+                if not wet:
+                    return pieces               # roundabout: the street ends here
+                out = None
+            elif out is None and not wet:
+                if in_disc(p):
+                    return pieces
+                out = [p]
+        if out is not None and math.dist(out[-1], b) > 1e-6:
+            out.append(b)
+    if out is not None and len(out) > 1:
+        pieces.append(out)
+    return pieces
 
 
 def build_quais(river, box):
@@ -842,9 +893,66 @@ def streets_for_face(face, river, discs=()):
                      for o in result for a2, b2 in zip(o, o[1:]))
         if not ok:
             continue
-        line = cut_at_obstacles(line, river, discs)
-        if line and math.dist(line[0], line[-1]) > 40.0:
-            result.append(line)
+        result.extend(piece for piece in cut_at_obstacles(line, river, discs)
+                      if math.dist(piece[0], piece[-1]) > 40.0)
+    return result
+
+
+def split_face(pts, rids, c, a, cut_rid):
+    """Clip a superblock to the half-plane dot(p - c, a) >= 0. rids[i] names the edge
+    leaving pts[i]; edges along the cut get cut_rid."""
+    n = len(pts)
+    side = [dot(sub(p, c), a) for p in pts]
+    out, out_r = [], []
+    for i in range(n):
+        j = (i + 1) % n
+        S, E = pts[i], pts[j]
+        if side[j] >= 0:
+            if side[i] < 0:
+                out.append(add(S, mul(sub(E, S), side[i] / (side[i] - side[j]))))
+                out_r.append(rids[i])
+            out.append(E)
+            out_r.append(rids[j])
+        elif side[i] >= 0:
+            out.append(add(S, mul(sub(E, S), side[i] / (side[i] - side[j]))))
+            out_r.append(cut_rid)
+    return out, out_r
+
+
+def streets_for_superblock(face, river, discs=(), depth=0):
+    """streets_for_face fans streets from one side only, so it leaves most of an
+    oversized superblock empty (and the park pass turns that into lawn). The wide river
+    makes these common: hubs keep clear of it, so the boulevards around it enclose
+    blocks several times the usual size. Halve those along a minor street across
+    their long axis until every piece is a normal size."""
+    pts, rids = face
+    area = abs(poly_area(pts))
+    if area <= SUPERBLOCK_SPLIT_AREA or depth >= 4:
+        return streets_for_face(face, river, discs)
+    n = len(pts)
+    c = (sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n)
+    sxx = sum((p[0] - c[0]) ** 2 for p in pts)
+    syy = sum((p[1] - c[1]) ** 2 for p in pts)
+    sxy = sum((p[0] - c[0]) * (p[1] - c[1]) for p in pts)
+    ang = 0.5 * math.atan2(2 * sxy, sxx - syy)          # principal (long) axis
+    a = (math.cos(ang), math.sin(ang))
+    cut_rid = 10 ** 6 + depth                           # any id >= 0 that isn't a boulevard
+    halves = [split_face(pts, rids, c, a, cut_rid),
+              split_face(pts, rids, c, mul(a, -1.0), cut_rid)]
+    # The cut street: the parts of the line through c, across the long axis, that lie
+    # inside the superblock (more than one if the block is concave).
+    d = left(a)
+    ts = sorted(r[0] for i in range(n)
+                for r in [seg_intersect(c, add(c, d), pts[i], pts[(i + 1) % n])]
+                if r is not None and 0.0 <= r[1] < 1.0)
+    result = []
+    for t0, t1 in zip(ts, ts[1:]):
+        m = add(c, mul(d, (t0 + t1) / 2))
+        if t1 - t0 > 40.0 and point_in_poly(m, pts):
+            result.extend(cut_at_obstacles([add(c, mul(d, t0)), add(c, mul(d, t1))], river, discs))
+    for hp, hr in halves:
+        if len(hp) >= 3 and abs(poly_area(hp)) > 1e4:
+            result.extend(streets_for_superblock((hp, hr), river, discs, depth + 1))
     return result
 
 
@@ -1287,7 +1395,7 @@ def generate(seed=SEED, region=REGION, network=None):
         if green.contains((sum(p[0] for p in pts) / len(pts),
                            sum(p[1] for p in pts) / len(pts))):
             continue
-        streets.extend(streets_for_face((pts, rids), river, discs))
+        streets.extend(streets_for_superblock((pts, rids), river, discs))
     if QUAI_ROADS:
         quais = build_quais(river, reg)
         streets.extend(quais)
