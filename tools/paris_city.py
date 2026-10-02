@@ -48,7 +48,7 @@ SEED = 7
 MAP_W = 25100.0             # X, periodic: x and x + MAP_W are the same place
 MAP_H = 32000.0             # Y, open ends
 GREEN_BORDER = 1000.0       # green band along both 25.1 km edges (river passes through)
-REGION = "river"            # "river" | None | (x0, y0, x1, y1)
+REGION = None            # "river" | None | (x0, y0, x1, y1)
 REGION_SIZE = 5000.0        # size of the "river" sample window
 WORK_MARGIN = 3000.0        # network context generated around the region
 
@@ -1207,8 +1207,11 @@ def resolve_region(region, river):
     return (x0, max(0.0, y0), x1, min(MAP_H, y1))
 
 
-def generate(seed=SEED, region=REGION):
-    t0 = time.time()
+def generate_network(seed=SEED):
+    """The whole-map passes: river, hubs and the boulevard graph. They don't depend on
+    the region, so a tiled export computes them once and passes the result to every
+    tile via generate(network=...). Later passes draw from sub_rng, never from these
+    generators, so skipping this step leaves a tile's output unchanged."""
     rng = np.random.default_rng(seed)
     base_rng = random.Random(seed)
 
@@ -1224,6 +1227,13 @@ def generate(seed=SEED, region=REGION):
     smlh = {ROUNDABOUT_TYPES[t][0]: sizes.count(t) for t in (0, 1, 2)}
     print(f"  {len(hubs)} hubs, {len(edges)} boulevards, links per hub {hist}")
     print(f"  {dropped_bridges} river-grazing boulevards dropped; roundabouts {smlh}")
+    return dict(river=river, hubs=hubs, edges=edges, sizes=sizes)
+
+
+def generate(seed=SEED, region=REGION, network=None):
+    t0 = time.time()
+    net = network if network is not None else generate_network(seed)
+    river, hubs, edges, sizes = net["river"], net["hubs"], net["edges"], net["sizes"]
 
     reg = resolve_region(region, river)
     wx0, wy0 = reg[0] - WORK_MARGIN, max(GREEN_BORDER, reg[1] - WORK_MARGIN)
@@ -1391,17 +1401,28 @@ def build_chunk_meshes(r, include_buildings=True):
                 acc.quad_xy([(x0, gy0), (x1, gy0), (x1, gy1), (x0, gy1)], Z_PARK, P)
 
     px0, py0 = r["park_origin"]                              # parks
-    step = int(CHUNK_X / PARK_CELL), int(CHUNK_Y / PARK_CELL)
+    pmask = r["parks"]
     for (i, j), acc in terrain.items():
-        ix = int(round((i * CHUNK_X - px0) / PARK_CELL))
-        jy = int(round((j * CHUNK_Y - py0) / PARK_CELL))
-        if ix < 0 or jy < 0:
+        # CHUNK_X is not a whole number of cells (502 / 2.5 = 200.8), so chunk edges
+        # fall mid-cell. Take every cell the chunk overlaps, keep the rects at their
+        # true raster position, and clip them to the chunk: neighbours then meet
+        # exactly at the shared edge instead of leaving a gap or drifting by a
+        # fraction of a cell.
+        x0, y0 = i * CHUNK_X, j * CHUNK_Y
+        x1, y1 = x0 + CHUNK_X, min(MAP_H, y0 + CHUNK_Y)
+        ix0 = max(0, int(math.floor((x0 - px0) / PARK_CELL)))
+        jy0 = max(0, int(math.floor((y0 - py0) / PARK_CELL)))
+        ix1 = min(pmask.shape[1], int(math.ceil((x1 - px0) / PARK_CELL)))
+        jy1 = min(pmask.shape[0], int(math.ceil((y1 - py0) / PARK_CELL)))
+        if ix1 <= ix0 or jy1 <= jy0:
             continue
-        sub_mask = r["parks"][jy:jy + step[1], ix:ix + step[0]]
-        if sub_mask.size == 0:
-            continue
-        for rx0, ry0, rx1, ry1 in mask_to_rects(sub_mask, i * CHUNK_X, j * CHUNK_Y, PARK_CELL):
-            acc.quad_xy([(rx0, ry0), (rx1, ry0), (rx1, ry1), (rx0, ry1)], Z_PARK, P)
+        sub_mask = pmask[jy0:jy1, ix0:ix1]
+        for rx0, ry0, rx1, ry1 in mask_to_rects(sub_mask, px0 + ix0 * PARK_CELL,
+                                                py0 + jy0 * PARK_CELL, PARK_CELL):
+            rx0, ry0 = max(rx0, x0), max(ry0, y0)
+            rx1, ry1 = min(rx1, x1), min(ry1, y1)
+            if rx1 - rx0 > 1e-6 and ry1 - ry0 > 1e-6:
+                acc.quad_xy([(rx0, ry0), (rx1, ry0), (rx1, ry1), (rx0, ry1)], Z_PARK, P)
 
     for i in range(len(river.x) - 1):                        # water + islands
         if not (reg[1] - 200 < river.y[i] < reg[3] + 200):
