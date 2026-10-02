@@ -27,9 +27,10 @@ lifetime/threading rules.
 - **Reversed-Z, infinite far, D32F** on [0, 1]-depth backends. Terrain layers sit 5 cm
   apart and are seen from 8 km; standard depth z-fights from ~1 km. OpenGL
   (`homogeneousDepth`) falls back to a normal projection with near = 2 m.
-- **Haze, not the 4–7 km fog wall.** Until the backdrop shell exists the far side *is*
-  the geometry, so fog is exponential from 1.5 km toward 80% (`k_fog_*` in
-  `world_renderer.cpp`). Revisit when the backdrop lands.
+- **Haze, not the 4–7 km fog wall.** Fog is exponential from 1.5 km, rescaled to be
+  fully opaque at 7 km (`k_fog_*` in `world_renderer.cpp`), so the far side is hidden
+  until the backdrop shell exists. The light column is only 30% fogged so it stays
+  visible end to end.
 - **`BGFX_CAPS_INSTANCING` no longer exists.** bgfx raised its renderer baseline
   (upstream 8c8b6b569) and removed caps every backend supports; no fallback needed.
 - **`--shot file.png [--pos x y alt] [--view yaw pitch]`** renders one frame and exits,

@@ -3,7 +3,7 @@ $input v_color0, v_normal, v_up, v_relPos
 #include <bgfx_shader.sh>
 
 uniform vec4 u_material;    // x: 1 = emissive (the light column), 0 = lit
-uniform vec4 u_fog;         // x: density per metre, y: max opacity, z: clear distance
+uniform vec4 u_fog;         // x: density per metre, y: opaque distance, z: clear distance
 uniform vec4 u_fogColor;
 
 void main()
@@ -23,7 +23,12 @@ void main()
     vec3 col = v_color0.rgb * mix(light, 1.0, u_material.x);
 
     float dist = length(v_relPos);
-    float fog  = u_fog.y * (1.0 - exp(-max(dist - u_fog.z, 0.0) * u_fog.x));
+    // Exponential haze rescaled so it reaches exactly 1 at the opaque distance;
+    // a bare exponential only approaches it.
+    float span = u_fog.y - u_fog.z;
+    float fog  = (1.0 - exp(-max(dist - u_fog.z, 0.0) * u_fog.x))
+               / (1.0 - exp(-span * u_fog.x));
+    fog = min(fog, 1.0);
     fog *= 1.0 - 0.7 * u_material.x;
 
     gl_FragColor = vec4(mix(col, u_fogColor.rgb, fog), 1.0);
