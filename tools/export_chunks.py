@@ -7,7 +7,8 @@ CPython (needs only numpy).
     python3 export_chunks.py --region 20080 13500 25100 18500 --out world/
     python3 export_chunks.py --all --tile 5020 4000 --out world/ [--jobs N]
 
---all runs tiles in parallel worker processes (default: one per CPU). The whole-map
+--all runs tiles in parallel worker processes (default: half the logical CPUs, at low
+priority, one BLAS thread each). The whole-map
 network (river, hubs, boulevards) is computed once in the parent and shared, and only
 the parent writes manifest.json and prototypes.bin, after every tile has finished.
 
@@ -250,6 +251,9 @@ _worker_network = None
 def _init_worker(network):
     global _worker_network
     _worker_network = network
+    # Stay out of the way of the desktop while a long export runs.
+    with contextlib.suppress(OSError):
+        os.nice(10)
 
 
 def _export_tile(job):
@@ -278,6 +282,10 @@ def export_all(tile, out_dir, jobs):
     tasks = [((rr, cc), (cc * tw, rr * th, (cc + 1) * tw, (rr + 1) * th), out_dir)
              for rr in range(rows) for cc in range(cols)]
     chunk_list, failed = [], []
+    # Spawned workers inherit this before importing numpy; without it every worker
+    # starts its own BLAS pool sized to the whole machine and oversubscribes it.
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
     with mp.get_context("spawn").Pool(jobs, initializer=_init_worker,
                                       initargs=(network,)) as pool:
         for done, (key, chunks, secs, err) in enumerate(
@@ -311,8 +319,8 @@ if __name__ == "__main__":
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--tile", nargs=2, type=float, default=[5020.0, 4000.0])
     ap.add_argument("--out", default="world")
-    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
-                    help="worker processes for --all (default: one per CPU)")
+    ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2),
+                    help="worker processes for --all (default: half the logical CPUs)")
     a = ap.parse_args()
     if a.all:
         sys.exit(0 if export_all(a.tile, a.out, max(1, a.jobs)) else 1)
