@@ -7,5 +7,7 @@ binding-file schema decisions.
 
 ## Decisions & Notes
 
-_(none yet — add short entries here as design choices are made: what was decided, why,
-and what alternatives were rejected)_
+- **Mouselook needs `SDL_SetWindowRelativeMouseMode`, not `SDL_SetWindowMouseGrab`.**
+  A grab only confines the pointer; once it pins against the window edge (immediately
+  on Wayland) `xrel` stops and yaw stalls. Relative mode hides the cursor and delivers
+  unbounded deltas. Mouselook is still in `main.cpp` until this module exists.

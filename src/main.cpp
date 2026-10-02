@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -380,8 +381,10 @@ int main(int argc, char* argv[])
                         else if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER) {
                             if (menu_sel == 0) {
                                 screen = Screen::Game;
-                                SDL_HideCursor();
-                                SDL_SetWindowMouseGrab(window, true);
+                                // Relative mode, not just a grab: a grab only confines
+                                // the pointer, and once it pins against the window edge
+                                // (always, on Wayland) the deltas stop and yaw stalls.
+                                SDL_SetWindowRelativeMouseMode(window, true);
                             } else {
                                 running = false;         // QUIT
                             }
@@ -392,8 +395,7 @@ int main(int argc, char* argv[])
                         // ESC suspends to menu without resetting game state.
                         if (sc == SDL_SCANCODE_ESCAPE) {
                             screen = Screen::Menu;
-                            SDL_SetWindowMouseGrab(window, false);
-                            SDL_ShowCursor();
+                            SDL_SetWindowRelativeMouseMode(window, false);
                         }
                         break;
                 }
@@ -402,8 +404,7 @@ int main(int argc, char* argv[])
             if (ev.type == SDL_EVENT_MOUSE_MOTION && screen == Screen::Game) {
                 g_cam_yaw   += ev.motion.xrel * k_mouse_sens;
                 g_cam_pitch -= ev.motion.yrel * k_mouse_sens;
-                if (g_cam_yaw >  bx::kPi) g_cam_yaw -= bx::kPi2;
-                if (g_cam_yaw < -bx::kPi) g_cam_yaw += bx::kPi2;
+                g_cam_yaw    = std::remainder(g_cam_yaw, bx::kPi2);   // keep in [-π, π]
                 if (g_cam_pitch >  k_pitch_max) g_cam_pitch =  k_pitch_max;
                 if (g_cam_pitch < -k_pitch_max) g_cam_pitch = -k_pitch_max;
             }
