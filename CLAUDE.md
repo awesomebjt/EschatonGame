@@ -226,7 +226,7 @@ The fog radius holds far too many chunks to draw individually at full fidelity (
 | 2–4 km | ~150 | 1 terrain + 1 merged LOD3 batch | ~300 |
 | 4 km+ | 0 | backdrop shell | 1 |
 
-That lands inside the < 2,000 target. Instances are sorted by `(type, variant)` at load so each type is a single instanced draw; check `BGFX_CAPS_INSTANCING` at startup and keep a non-instanced fallback.
+That lands inside the < 2,000 target. Instances are sorted by `(type, variant)` at load so each type is a single instanced draw. No non-instanced fallback is needed: bgfx dropped `BGFX_CAPS_INSTANCING` because every backend supports it. The current loader goes further and draws each type once for the whole cylinder — see `src/render/CLAUDE.md`.
 
 ---
 
@@ -254,7 +254,7 @@ Unchanged in principle — flat-authored geometry is projected onto the cylinder
 2. **Correct radial normals.** Vertex normals point radially; lighting interpolation carries the illusion of smoothness past the geometric approximation.
 3. **Distance-based tessellation** for chunks within ~200 m of the player.
 
-**Required pipeline change (not yet implemented):** the exported terrain uses large flat polygons — a chunk's ground is a single quad, roads are long ribbons. Projecting four corners of a 502 m quad leaves a flat chord that sags **7.9 m** below the true arc. Before this renders correctly, the exporter must subdivide any terrain polygon edge longer than ~25 m (a 25 m chord deviates 2 cm, imperceptible), or the renderer must tessellate. Subdividing in the exporter is simpler and keeps the vertex shader trivial: a chunk ground becomes roughly 25 × 25 quads, about 1,250 triangles, which is nothing.
+**Required pipeline change (implemented at load time — see `src/world/CLAUDE.md`):** the exported terrain uses large flat polygons — a chunk's ground is a single quad, roads are long ribbons. Projecting four corners of a 502 m quad leaves a flat chord that sags **7.9 m** below the true arc. Before this renders correctly, the exporter must subdivide any terrain polygon edge longer than ~25 m (a 25 m chord deviates 2 cm, imperceptible), or the renderer must tessellate. Subdividing in the exporter is simpler and keeps the vertex shader trivial: a chunk ground becomes roughly 25 × 25 quads, about 1,250 triangles, which is nothing.
 
 **Buildings do not need this.** They are rigid structures standing on a curved floor, which is physically what they are. A 100 m wide building sitting tangent lifts its far corners 0.3 m — correct behaviour for a rigid foundation, not an artifact. Only surfaces that are meant to *follow* the shell get projected per vertex.
 
@@ -589,7 +589,7 @@ eschaton/
 ## Open Questions & Future Decisions
 
 - [ ] Audio middleware selection (OpenAL Soft vs miniaudio vs FMOD)
-- [ ] Terrain polygon subdivision: exporter-side (~25 m) vs GPU tessellation — **blocks correct curvature**
+- [x] Terrain polygon subdivision — done at load time: faces are cut along global map-X lines every ~24 m (see `src/world/CLAUDE.md`)
 - [ ] Texture compression format for the backdrop plate (BC7 colour, BC4 height?)
 - [ ] Vegetation rendering strategy (billboard grass vs geometry instancing)
 - [ ] Water rendering approach; river is currently a flat surface with no carved channel

@@ -84,22 +84,32 @@ set(BGFX_SHADER_INCLUDE_PATH "${bgfx_cmake_SOURCE_DIR}/bgfx/src"
 # Shader compilation
 # ---------------------------------------------------------------------------
 set(SHADER_OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders)
+set(SHADER_SRC_DIR    ${CMAKE_SOURCE_DIR}/shaders)
 
 bgfx_compile_shaders(
     TYPE        VERTEX
-    SHADERS     ${CMAKE_SOURCE_DIR}/shaders/vs_mesh.sc
-    VARYING_DEF ${CMAKE_SOURCE_DIR}/shaders/varying.def.sc
+    SHADERS     ${SHADER_SRC_DIR}/vs_terrain.sc
+                ${SHADER_SRC_DIR}/vs_building.sc
+    VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
+    INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
     OUT_FILES_VAR VS_OUTPUT_FILES
 )
 
 bgfx_compile_shaders(
     TYPE        FRAGMENT
-    SHADERS     ${CMAKE_SOURCE_DIR}/shaders/fs_mesh.sc
-    VARYING_DEF ${CMAKE_SOURCE_DIR}/shaders/varying.def.sc
+    SHADERS     ${SHADER_SRC_DIR}/fs_world.sc
+    VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
+    INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
     OUT_FILES_VAR FS_OUTPUT_FILES
 )
+
+# bgfx_compile_shaders only tracks the .sc and varying.def; make the shared
+# include rebuild its users too.
+foreach(out ${VS_OUTPUT_FILES})
+    add_custom_command(OUTPUT ${out} APPEND DEPENDS ${SHADER_SRC_DIR}/cylinder.sh)
+endforeach()
 
 add_custom_target(compile_shaders ALL DEPENDS ${VS_OUTPUT_FILES} ${FS_OUTPUT_FILES})
 
@@ -108,12 +118,18 @@ add_custom_target(compile_shaders ALL DEPENDS ${VS_OUTPUT_FILES} ${FS_OUTPUT_FIL
 # ---------------------------------------------------------------------------
 add_executable(eschaton
     src/main.cpp
+    src/core/json.cpp
+    src/render/shader.cpp
+    src/render/world_renderer.cpp
+    src/world/formats.cpp
+    src/world/world_loader.cpp
 )
 
 add_dependencies(eschaton compile_shaders)
 
 target_compile_definitions(eschaton PRIVATE
     SHADER_DIR="${SHADER_OUTPUT_DIR}"
+    WORLD_DIR="${CMAKE_SOURCE_DIR}/world"
 )
 
 target_compile_options(eschaton PRIVATE
@@ -126,7 +142,10 @@ target_compile_options(eschaton PRIVATE
     >
 )
 
+find_package(Threads REQUIRED)
+
 target_link_libraries(eschaton PRIVATE
+    Threads::Threads
     EnTT::EnTT
     SDL3::SDL3-static
     bgfx

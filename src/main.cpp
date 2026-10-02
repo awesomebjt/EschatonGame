@@ -1,10 +1,19 @@
+#include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <optional>
 
 #include <bgfx/bgfx.h>
+#include <bimg/bimg.h>
+#include <bx/file.h>
 #include <bx/math.h>
 #include <SDL3/SDL.h>
 #include <entt/entt.hpp>
+
+#include "render/world_renderer.h"
+#include "world/world_loader.h"
+#include "world/wrap.h"
 
 static constexpr uint32_t k_width  = 1280;
 static constexpr uint32_t k_height =  720;
@@ -19,91 +28,152 @@ static uint16_t cx(uint16_t len) { return (k_cols - len) / 2; }
 enum class Screen { Title, Menu, Game };
 
 // Scene state — created once on first Game entry, destroyed on shutdown.
-static bgfx::ProgramHandle g_program      = BGFX_INVALID_HANDLE;
-static bgfx::UniformHandle g_s_texColor   = BGFX_INVALID_HANDLE;
-static bgfx::TextureHandle g_white_tex    = BGFX_INVALID_HANDLE;
-static bool                g_scene_loaded = false;
+static render::WorldRenderer g_world;
+static bool                  g_scene_loaded = false;
+static bool                  g_load_failed  = false;
+static int                   g_load_wait    = 0;   // frames the LOADING card has been up
 
-// Camera orientation controlled by mouselook.
-// Yaw rotates left/right around the hub-pointing (Y) axis and wraps freely.
+// Camera position in map space. Starts at the axial midpoint, 200 m off the wall;
+// set from the manifest on load unless --pos overrides it.
+static render::CameraPos g_cam;
+static bool              g_cam_from_args = false;
+
+// Camera orientation controlled by mouselook, relative to the local "up" (toward
+// the axis). Yaw 0 looks along the axis (+Y in map space); yaw wraps freely.
 // Pitch tilts up/down, clamped to straight down / straight up.
 static float g_cam_yaw              = 0.0f;
 static float g_cam_pitch            = 0.0f;
 static constexpr float k_mouse_sens = 0.002f;          // radians per pixel
 static constexpr float k_pitch_max  = bx::kPiHalf;
 
+static constexpr double k_start_altitude = 200.0;      // metres off the wall
+static constexpr double k_fly_speed      = 40.0;       // m/s; Shift ×10
+static double           g_cylinder_radius = 0.0;       // from the manifest
+static double           g_map_h           = 0.0;
+
+// --shot: render one frame of the world to a PNG and exit (for headless checks).
+static const char* g_shot_path = nullptr;
+
 // -----------------------------------------------------------------------
-// Shader loading helpers
+// bgfx callback: forwards traces and writes screenshots as PNG
 // -----------------------------------------------------------------------
 
-// Map bgfx renderer type to the subdirectory name used by bgfx_compile_shaders.
-static const char* shader_backend()
+struct BgfxCallback final : public bgfx::CallbackI
 {
-    switch (bgfx::getRendererType())
+    bool shot_done = false;
+
+    void fatal(const char* file, uint16_t line, bgfx::Fatal::Enum code, const char* str) override
     {
-        case bgfx::RendererType::Vulkan:     return "spirv";
-        case bgfx::RendererType::OpenGL:     return "glsl";
-        case bgfx::RendererType::OpenGLES:   return "essl";
-        case bgfx::RendererType::Direct3D11: return "dx11";
-        case bgfx::RendererType::Direct3D12: return "dx12";
-        case bgfx::RendererType::Metal:      return "metal";
-        default:                              return "spirv";
+        fprintf(stderr, "bgfx fatal %s:%u: %s\n", file, line, str);
+        if (code != bgfx::Fatal::DebugCheck) abort();
     }
-}
-
-// Load a compiled shader binary.  `sc_filename` is the .sc source name
-// (e.g. "vs_mesh.sc") so the path matches bgfx_compile_shaders output:
-//   SHADER_DIR/<backend>/<sc_filename>.bin
-static bgfx::ShaderHandle load_shader_binary(const char* sc_filename)
-{
-    char path[512];
-    snprintf(path, sizeof(path), SHADER_DIR "/%s/%s.bin", shader_backend(), sc_filename);
-
-    FILE* f = fopen(path, "rb");
-    if (!f)
+    void traceVargs(const char* /*file*/, uint16_t /*line*/, const char* format, va_list args) override
     {
-        fprintf(stderr, "load_shader_binary: cannot open %s\n", path);
-        return BGFX_INVALID_HANDLE;
+        vfprintf(stderr, format, args);
     }
+    void profilerBegin(const char*, uint32_t, const char*, uint16_t) override {}
+    void profilerBeginLiteral(const char*, uint32_t, const char*, uint16_t) override {}
+    void profilerEnd() override {}
+    uint32_t cacheReadSize(uint64_t) override { return 0; }
+    bool cacheRead(uint64_t, void*, uint32_t) override { return false; }
+    void cacheWrite(uint64_t, const void*, uint32_t) override {}
+    void screenShot(const char* path, uint32_t width, uint32_t height, uint32_t pitch,
+                    bgfx::TextureFormat::Enum format, const void* data, uint32_t /*size*/,
+                    bool yflip) override
+    {
+        bx::FileWriter writer;
+        bx::Error      err;
+        if (bx::open(&writer, bx::FilePath(path), false, &err)) {
+            bimg::imageWritePng(&writer, width, height, pitch, data,
+                                static_cast<bimg::TextureFormat::Enum>(format), yflip, &err);
+            bx::close(&writer);
+        }
+        if (err.isOk()) printf("screenshot: %s (%ux%u)\n", path, width, height);
+        else            fprintf(stderr, "screenshot: failed to write %s\n", path);
+        shot_done = true;
+    }
+    void captureBegin(uint32_t, uint32_t, uint32_t, bgfx::TextureFormat::Enum, bool) override {}
+    void captureEnd() override {}
+    void captureFrame(const void*, uint32_t) override {}
+};
 
-    fseek(f, 0, SEEK_END);
-    const long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    const bgfx::Memory* mem = bgfx::alloc(static_cast<uint32_t>(size + 1));
-    fread(mem->data, 1, static_cast<size_t>(size), f);
-    mem->data[size] = '\0';
-    fclose(f);
-
-    return bgfx::createShader(mem);
-}
+static BgfxCallback g_bgfx_callback;
 
 // -----------------------------------------------------------------------
 // Scene setup
 // -----------------------------------------------------------------------
 
-// Builds the shading resources (fog shader program, sampler, fallback
-// texture) that scene geometry will draw with. The scene has no geometry yet.
+// Loads every chunk of the cylinder and uploads it. Blocking: a few seconds.
 static bool load_scene()
 {
-    const bgfx::ShaderHandle vs = load_shader_binary("vs_mesh.sc");
-    const bgfx::ShaderHandle fs = load_shader_binary("fs_mesh.sc");
-    if (!bgfx::isValid(vs) || !bgfx::isValid(fs))
-    {
-        if (bgfx::isValid(vs)) bgfx::destroy(vs);
-        if (bgfx::isValid(fs)) bgfx::destroy(fs);
+    const uint64_t t0 = SDL_GetTicksNS();
+    auto world = world::load_world(WORLD_DIR);
+    if (!world) {
+        fprintf(stderr, "load_scene: failed to load world from %s\n", WORLD_DIR);
+        return false;
+    }
+    const uint64_t t1 = SDL_GetTicksNS();
+
+    if (!g_world.create(*world)) {
+        fprintf(stderr, "load_scene: failed to create world GPU resources\n");
         return false;
     }
 
-    g_program    = bgfx::createProgram(vs, fs, /*destroyShaders=*/true);
-    g_s_texColor = bgfx::createUniform("s_texColor", bgfx::UniformType::Sampler);
+    const world::Manifest& m = world->manifest;
+    g_cylinder_radius = m.radius;
+    g_map_h           = m.map_h;
+    if (!g_cam_from_args) {
+        g_cam.x   = 0.5 * m.map_w;
+        g_cam.y   = 0.5 * m.map_h;
+        g_cam.alt = k_start_altitude;
+    }
 
-    // 1x1 white fallback texture for geometry without materials.
-    const uint32_t white = 0xFFFFFFFF;
-    g_white_tex = bgfx::createTexture2D(1, 1, false, 1, bgfx::TextureFormat::RGBA8, 0,
-                                        bgfx::copy(&white, 4));
-
+    const render::WorldStats& st = g_world.stats();
+    printf("world: %zu chunks, %llu terrain tris in %u draws, %llu buildings in %u draws, "
+           "%zu monuments; loaded in %.2f s, uploaded in %.2f s\n",
+           m.chunks.size(), static_cast<unsigned long long>(st.terrain_triangles), st.terrain_draws,
+           static_cast<unsigned long long>(st.building_instances), st.building_draws,
+           world->monument_count, (t1 - t0) * 1e-9, (SDL_GetTicksNS() - t1) * 1e-9);
     return true;
+}
+
+// -----------------------------------------------------------------------
+// Camera
+// -----------------------------------------------------------------------
+
+// Render space is camera-relative with +Y toward the axis, +Z along the axis
+// (map +Y) and +X around the circumference (map +X); see shaders/cylinder.sh.
+static bx::Vec3 cam_forward()
+{
+    const float cp = bx::cos(g_cam_pitch);
+    return {cp * bx::sin(g_cam_yaw), bx::sin(g_cam_pitch), cp * bx::cos(g_cam_yaw)};
+}
+
+// Free-fly movement. A render-space step converts back to map space at the
+// camera's own radius: circumferential metres there are R / (R − alt) map metres.
+static void update_camera(double dt)
+{
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+    const bx::Vec3 f = cam_forward();
+    const bx::Vec3 right{bx::cos(g_cam_yaw), 0.0f, -bx::sin(g_cam_yaw)};
+
+    float mx = 0, my = 0, mz = 0;
+    auto add = [&](const bx::Vec3& v, float s) { mx += v.x * s; my += v.y * s; mz += v.z * s; };
+    if (keys[SDL_SCANCODE_W]) add(f, 1.0f);
+    if (keys[SDL_SCANCODE_S]) add(f, -1.0f);
+    if (keys[SDL_SCANCODE_D]) add(right, 1.0f);
+    if (keys[SDL_SCANCODE_A]) add(right, -1.0f);
+    if (keys[SDL_SCANCODE_SPACE]) my += 1.0f;
+    if (keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_C]) my -= 1.0f;
+
+    const double len = std::sqrt(double(mx) * mx + double(my) * my + double(mz) * mz);
+    if (len < 1e-6) return;
+    const double speed = k_fly_speed * (keys[SDL_SCANCODE_LSHIFT] ? 10.0 : 1.0) * dt / len;
+
+    const double R = g_cylinder_radius;
+    g_cam.x   = world::wrap_x(g_cam.x + mx * speed * R / (R - g_cam.alt));
+    g_cam.alt = bx::clamp(g_cam.alt + my * speed, 1.5, R - 100.0);
+    g_cam.y   = bx::clamp(g_cam.y + mz * speed, 0.0, g_map_h);
 }
 
 // -----------------------------------------------------------------------
@@ -112,33 +182,38 @@ static bool load_scene()
 
 static void render_scene()
 {
-    // Camera: sit at the cylinder's geometric centre.
-    // "Up" always points toward the hub (world +Y), ensuring the floor stays down.
-    // Look direction is derived from yaw (left/right) and pitch (up/down).
+    // The eye is always the render-space origin; the world is built around it.
+    // "Up" is the local direction toward the axis (+Y), so the floor stays down.
     float view[16];
     float proj[16];
 
-    const bx::Vec3 eye{0.0f, -3995.0f, 0.0f};
-    const float cp = bx::cos(g_cam_pitch);
+    const bx::Vec3 eye{0.0f, 0.0f, 0.0f};
+    const bx::Vec3 at = cam_forward();
     const float sp = bx::sin(g_cam_pitch);
-    const float cy = bx::cos(g_cam_yaw);
+    const float cp = bx::cos(g_cam_pitch);
     const float sy = bx::sin(g_cam_yaw);
-    const bx::Vec3 at {
-        eye.x + cp * sy,   // yaw=0 → looking along +Z; yaw=90° → +X
-        eye.y + sp,
-        eye.z + cp * cy
-    };
+    const float cy = bx::cos(g_cam_yaw);
     // Up is world +Y tilted by pitch, so it stays perpendicular to the look
     // direction and mtxLookAt doesn't degenerate at straight up/down.
     const bx::Vec3 up {-sp * sy, cp, -sp * cy};
     bx::mtxLookAt(view, eye, at, up);
 
+    // Reversed-Z with an infinite far plane where depth is [0, 1]: terrain layers
+    // sit 5 cm apart and are visible 8 km away, far past what standard depth
+    // resolves. OpenGL's [-1, 1] range defeats the trick, so it gets a plain
+    // projection with a pushed-out near plane instead.
+    const bool  reversed_z = !bgfx::getCaps()->homogeneousDepth;
     const float aspect = static_cast<float>(k_width) / static_cast<float>(k_height);
-    bx::mtxProj(proj, 70.0f, aspect, 1.0f, 100000.0f,
-                bgfx::getCaps()->homogeneousDepth);
+    if (reversed_z)
+        bx::mtxProjInf(proj, 70.0f, aspect, 0.5f, false, bx::Handedness::Left, bx::NearFar::Reverse);
+    else
+        bx::mtxProj(proj, 70.0f, aspect, 2.0f, 40000.0f, true);
 
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, render::k_fog_rgba,
+                       reversed_z ? 0.0f : 1.0f, 0);
     // setViewTransform is per-view and persists for all draws to view 0 this frame.
     bgfx::setViewTransform(0, view, proj);
+    g_world.submit(0, g_cam, reversed_z);
 }
 
 // -----------------------------------------------------------------------
@@ -147,22 +222,50 @@ static void render_scene()
 
 static void free_scene()
 {
-    if (bgfx::isValid(g_s_texColor)) bgfx::destroy(g_s_texColor);
-    if (bgfx::isValid(g_white_tex))  bgfx::destroy(g_white_tex);
-    if (bgfx::isValid(g_program))    bgfx::destroy(g_program);
-
-    g_s_texColor   = BGFX_INVALID_HANDLE;
-    g_white_tex    = BGFX_INVALID_HANDLE;
-    g_program      = BGFX_INVALID_HANDLE;
+    g_world.destroy();
     g_scene_loaded = false;
+}
+
+// -----------------------------------------------------------------------
+// Command line
+// -----------------------------------------------------------------------
+
+//   --shot <file.png>         render the world once, save a screenshot, exit
+//   --pos <x> <y> <alt>       start position in map metres
+//   --view <yaw> <pitch>      start orientation in degrees
+static bool parse_args(int argc, char* argv[])
+{
+    for (int i = 1; i < argc; ++i) {
+        const char* a = argv[i];
+        if (!strcmp(a, "--shot") && i + 1 < argc) {
+            g_shot_path = argv[++i];
+        } else if (!strcmp(a, "--pos") && i + 3 < argc) {
+            g_cam.x   = atof(argv[++i]);
+            g_cam.y   = atof(argv[++i]);
+            g_cam.alt = atof(argv[++i]);
+            g_cam_from_args = true;
+        } else if (!strcmp(a, "--view") && i + 2 < argc) {
+            g_cam_yaw   = bx::toRad(static_cast<float>(atof(argv[++i])));
+            g_cam_pitch = bx::clamp(bx::toRad(static_cast<float>(atof(argv[++i]))),
+                                    -k_pitch_max, k_pitch_max);
+        } else {
+            fprintf(stderr, "usage: %s [--shot file.png] [--pos x y alt] [--view yaw pitch]\n",
+                    argv[0]);
+            return false;
+        }
+    }
+    return true;
 }
 
 // -----------------------------------------------------------------------
 // Entry point
 // -----------------------------------------------------------------------
 
-int main(int /*argc*/, char* /*argv*/[])
+int main(int argc, char* argv[])
 {
+    if (!parse_args(argc, argv))
+        return 1;
+
     // ---------------------------------------------------------------
     // SDL3: window
     // ---------------------------------------------------------------
@@ -188,7 +291,10 @@ int main(int /*argc*/, char* /*argv*/[])
     init.type              = bgfx::RendererType::Count; // auto-select
     init.swapChain.width  = k_width;
     init.swapChain.height = k_height;
-    init.reset             = BGFX_RESET_VSYNC;
+    init.reset             = BGFX_RESET_VSYNC | BGFX_RESET_MSAA_X4;
+    // 32-bit float depth for reversed-Z (see render_scene).
+    init.swapChain.formatDepthStencil = bgfx::TextureFormat::D32F;
+    init.callback          = &g_bgfx_callback;
 
     SDL_PropertiesID props = SDL_GetWindowProperties(window);
 
@@ -233,7 +339,7 @@ int main(int /*argc*/, char* /*argv*/[])
     // ---------------------------------------------------------------
     // UI state
     // ---------------------------------------------------------------
-    Screen   screen      = Screen::Title;
+    Screen   screen      = g_shot_path ? Screen::Game : Screen::Title;
     uint64_t title_start = SDL_GetTicks();
     int      menu_sel    = 0;   // 0 = PLAY, 1 = QUIT
 
@@ -243,8 +349,13 @@ int main(int /*argc*/, char* /*argv*/[])
     // ---------------------------------------------------------------
     // Game loop
     // ---------------------------------------------------------------
-    bool running = true;
+    bool     running    = true;
+    uint64_t last_ticks = SDL_GetTicksNS();
+    int      shot_frame = 0;   // world frames rendered in --shot mode
     while (running) {
+        const uint64_t now_ticks = SDL_GetTicksNS();
+        const double   dt = (now_ticks - last_ticks) * 1e-9;
+        last_ticks = now_ticks;
 
         // -- Input --------------------------------------------------
         SDL_Event ev;
@@ -337,12 +448,48 @@ int main(int /*argc*/, char* /*argv*/[])
             }
 
             case Screen::Game:
-                // Load the scene on the first Game frame.
-                if (!g_scene_loaded)
-                    g_scene_loaded = load_scene();
+                // Show the loading card for a couple of frames so it actually
+                // reaches the screen, then load (blocking) on the next one.
+                if (!g_scene_loaded && !g_load_failed) {
+                    const char* txt = "LOADING WORLD...";
+                    bgfx::dbgTextPrintf(cx(static_cast<uint16_t>(strlen(txt))), k_rows / 2, 0x0F, txt);
+                    if (++g_load_wait > 2) {
+                        g_scene_loaded = load_scene();
+                        g_load_failed  = !g_scene_loaded;
+                        last_ticks     = SDL_GetTicksNS();   // don't fly off on the long frame
+                    }
+                } else if (g_load_failed) {
+                    const char* txt = "WORLD FAILED TO LOAD (see console)";
+                    bgfx::dbgTextPrintf(cx(static_cast<uint16_t>(strlen(txt))), k_rows / 2, 0x0C, txt);
+                    if (g_shot_path) running = false;
+                }
 
-                if (g_scene_loaded)
+                if (g_scene_loaded) {
+                    if (!g_shot_path) update_camera(dt);
                     render_scene();
+
+                    const bgfx::Stats* st = bgfx::getStats();
+                    const double cpu_ms = st->cpuTimerFreq
+                        ? 1000.0 * double(st->cpuTimeFrame) / double(st->cpuTimerFreq) : 0.0;
+                    const double gpu_ms = st->gpuTimerFreq
+                        ? 1000.0 * double(st->gpuTimeEnd - st->gpuTimeBegin) / double(st->gpuTimerFreq) : 0.0;
+                    bgfx::dbgTextPrintf(1, 1, 0x0F,
+                        "x %7.1f  y %7.1f  alt %6.1f m   yaw %4.0f  pitch %3.0f   "
+                        "frame %5.2f ms  gpu %5.2f ms  %u draws",
+                        g_cam.x, g_cam.y, g_cam.alt, bx::toDeg(g_cam_yaw), bx::toDeg(g_cam_pitch),
+                        cpu_ms, gpu_ms, st->numDraw);
+                    bgfx::dbgTextPrintf(1, 2, 0x07, "WASD fly, Space/C up/down, Shift fast, Esc menu");
+
+                    // --shot: let a few frames settle, capture, wait for the
+                    // render thread to hand the image back, then exit.
+                    if (g_shot_path) {
+                        ++shot_frame;
+                        if (shot_frame == 4)
+                            bgfx::requestScreenShot(bgfx::FrameBufferHandle BGFX_INVALID_HANDLE, g_shot_path);
+                        if (g_bgfx_callback.shot_done || shot_frame > 60)
+                            running = false;
+                    }
+                }
                 break;
         }
 

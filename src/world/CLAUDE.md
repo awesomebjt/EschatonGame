@@ -11,5 +11,17 @@ crossing — remember the backdrop shell rotates on rebase, it does not translat
 
 ## Decisions & Notes
 
-_(none yet — add short entries here as design choices are made: what was decided, why,
-and what alternatives were rejected)_
+- **Everything loads at once** (`world_loader.cpp`): all 3,200 chunks, worker threads
+  per terrain group, ~0.2 s on 16 cores. No streaming/eviction yet.
+- **Terrain subdivision happens at load, not in the exporter or on the GPU.** Each
+  exported face is regrouped from its fan and clipped at map-X lines every
+  `chunk_x / ceil(chunk_x / 25)` ≈ 23.9 m, measured from a chunk edge. Because the lines
+  are global, neighbouring faces split at identical points (no T-junction cracks) and
+  stacked layers (ground / water / park / road) stay parallel within every strip, so
+  chord sag can't reorder them. Only X is cut: the cylinder is straight along Y.
+  1.7M → 6.2M triangles. Exporter-side cutting with the same rule would be equivalent.
+- **Monument instance tables are not drawn**: the monuments are already baked into the
+  terrain mesh by `build_chunk_meshes`. The tables are counted and kept for scripting.
+- **Known data bug (generator):** parks stop 2 m short of every chunk's +X edge
+  (`step = int(CHUNK_X / PARK_CELL)` truncates 200.8 cells to 200 in
+  `build_chunk_meshes`), leaving a ground-coloured seam through parks every 502 m.
