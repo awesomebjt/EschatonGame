@@ -27,6 +27,16 @@ struct FogParams
     float clear   = 1500.0f;
 };
 
+// Cloud shadow map over the whole floor (u = x / map_w, v = y / map_h, both
+// repeating), sampled by map position. The cloud field drifts as one, so the map
+// never changes as it moves; the drift is an offset into it.
+struct CloudShadowBinding
+{
+    bgfx::TextureHandle texture  = BGFX_INVALID_HANDLE;   // R8; none = no shadow
+    float               strength = 1.0f;
+    double              offset_x = 0, offset_y = 0;       // field drift, map metres
+};
+
 struct WorldStats
 {
     uint32_t terrain_draws = 0;
@@ -49,8 +59,9 @@ public:
 
     const WorldStats& stats() const { return m_stats; }
 
-    // Read every submit, so it can be tuned live (the debug console does).
-    FogParams fog;
+    // Read every submit, so they can be tuned live (the debug console does).
+    FogParams          fog;
+    CloudShadowBinding cloud_shadow;
 
 private:
     struct Group
@@ -82,6 +93,10 @@ private:
     bgfx::UniformHandle u_material  = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle u_fog       = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle u_fog_color = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle u_shadow_uv = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle u_cloud_shadow = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle s_cloud_shadow = BGFX_INVALID_HANDLE;
+    bgfx::TextureHandle m_no_shadow    = BGFX_INVALID_HANDLE;   // 1×1 zero
 
     double   m_radius = 0, m_map_w = 0, m_map_h = 0;
     double   m_chunk_x = 0, m_chunk_y = 0;

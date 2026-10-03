@@ -174,6 +174,7 @@ The visual strategy prioritizes **shaders over high-resolution textures** to kee
 
 - **Procedural texturing** — noise-based materials for terrain, concrete, vegetation
 - **Atmospheric scattering** — simulated atmosphere with haze and distance fog matching the curved interior
+- **Clouds** — scattered cumulus at ~1.5 km as sorted soft puffs, with a whole-floor shadow map shaped by the line light; winds aloft run spinward (see `src/render/CLAUDE.md`)
 - **Central column lighting** — the light column is a massive linear area light; approximate with a multi-sample linear light model
 - **Curved horizon rendering** — the ground curves up on all sides; this must feel natural and not produce visual artifacts
 - **LOD-aware shading** — distant objects use simpler shaders automatically
@@ -557,7 +558,8 @@ eschaton/
 │   └── world/
 │       └── cylinder_0/          # manifest.json, prototypes.bin, chunk_*.bin
 ├── tests/
-│   └── physics_check.cpp        # headless player/collision scenarios (target physics_check)
+│   ├── physics_check.cpp        # headless player/collision scenarios (target physics_check)
+│   └── clouds_check.cpp         # cloud coverage and shadow strength (target clouds_check)
 ├── tools/
 │   └── CityGenerator/            # paris_city.py, export_chunks.py, render_map.py,
 │                                  # bake_height.py, preview_network.py

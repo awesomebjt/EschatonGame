@@ -311,9 +311,9 @@ void Console::key_down(const SDL_Event& ev, SDL_Window* window)
     }
 }
 
-void Console::run_line(std::string_view line, SDL_Window* window)
+void Console::run_line(std::string_view line, SDL_Window* window, bool open)
 {
-    set_open(true, window);
+    if (open) set_open(true, window);
     m_swallow_toggle_text = false;
     m_input.clear();
     m_cursor = 0;

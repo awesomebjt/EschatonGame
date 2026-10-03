@@ -30,8 +30,8 @@ public:
     // game adds after create(). Errors go to the scrollback.
     void eval_startup(const char* code);
 
-    // Opens the console and runs `line` exactly as if it had been typed.
-    void run_line(std::string_view line, SDL_Window* window);
+    // Runs `line` exactly as if it had been typed; `open` shows the console too.
+    void run_line(std::string_view line, SDL_Window* window, bool open = true);
 
     bool       is_open() const { return m_open; }
     mrb_state* vm() const { return m_mrb; }

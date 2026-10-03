@@ -35,6 +35,35 @@ lifetime/threading rules.
   visible end to end.
 - **`BGFX_CAPS_INSTANCING` no longer exists.** bgfx raised its renderer baseline
   (upstream 8c8b6b569) and removed caps every backend supports; no fallback needed.
-- **`--shot file.png [--pos x y alt] [--view yaw pitch] [--noclip] [--console ruby]...`** renders one frame and exits,
-  for visual checks without driving the menu. PNGs come from the bgfx callback in
+- **`--shot file.png [--pos x y alt] [--view yaw pitch] [--noclip] [--console ruby]... [--exec ruby]...`** renders one frame and exits,
+  for visual checks without driving the menu; the mouse is ignored. `--exec` runs a
+  console line without showing the console. PNGs come from the bgfx callback in
   `main.cpp`.
+- **Clouds are sorted sphere-impostor puffs** (`cloud_renderer.*`, `vs_cloud`/`fs_cloud`):
+  ~370 cumulus × ~14 puffs from `world/clouds.*` (seeded, wraps in x and y). Each frame
+  the CPU builds camera-relative instances, culls past the opaque fog, sorts back to
+  front and submits one instanced draw; blended, so bgfx sorts it after the opaque
+  world in view 0. The fragment shader ray-traces each puff as a sphere sliced flat at
+  the cloud base: a ray meeting the sphere below the base may still enter through the
+  base and then sees the flat underside. (Merely discarding below-base fragments, the
+  first version, showed rings and crescents from underneath: the near cap is cut away
+  and an impostor has nothing behind it.) Downward faces all get the same ambient
+  shade so bases and puff undersides meet without seams; the base softens only when
+  seen edge-on. Ray-marched volumetrics remain an option later and can reuse the same
+  seeded field.
+- **Puff offsets are true metres at the cloud's radius**, so map x is stretched by
+  R / (R − alt) (1.6× at 1.5 km), or clouds would look 38% too narrow around.
+- **Cloud shadow map:** R8, 512 × 653 (~49 m/texel) over the whole floor, built once per
+  field and sampled by map position in `fs_world` (terrain and buildings). Light is
+  radial, so a puff's shadow is its outline stretched 1.6× around the circumference;
+  the line light smears it along the axis with the kernel (2/π)/(1 + u²)², u = axial
+  offset / height. Physically weak: ~40% of the column's light at most, applied only to
+  the direct term, so ~13–24% darker. `Clouds.shadow` scales it (default 1 = physical).
+  Wind drift is an offset into the map, never a rebuild.
+- **Wind defaults to 5 m/s spinward** and towers lean spinward (`CloudParams::lean`):
+  rising air keeps the floor's angular momentum, which exceeds the frame's at smaller
+  radius, so the habitat's analogue of a Hadley cell gives spinward winds aloft and an
+  anti-spinward surface breeze (not modelled yet). Horizontal winds are never deflected
+  sideways (ω ∥ axis), so there are no cyclones; axial winds run straight.
+- **`clouds_check`** (target) checks floor coverage (target 12%, measured 13.4%) and the
+  peak shadow, and can dump the shadow map as a PGM.

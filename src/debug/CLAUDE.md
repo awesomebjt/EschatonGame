@@ -26,7 +26,8 @@ Scope: the Shift+` drop-down console (`console.*`) and the Ruby commands it expo
   open; it turns relative mouse mode off and restores it on close. `~` cannot be typed
   (it is the toggle).
 - **`--console "ruby"`** (repeatable) opens the console after the world loads and runs
-  the line as if typed; with `--shot` it is the headless way to test commands.
+  the line as if typed; `--exec "ruby"` does the same without opening it (for clean
+  `--shot` frames). With `--shot` they are the headless way to test commands.
 - **Adding a command:** C functions in `bindings.cpp` reach game state through
   `DebugHost` (pointers into `main.cpp` globals); thin Ruby sugar goes in
   `k_ruby_helpers`, and `help` should list it.

@@ -1,5 +1,5 @@
 $input a_position, a_normal, a_color0, i_data0, i_data1
-$output v_color0, v_normal, v_up, v_relPos
+$output v_color0, v_normal, v_up, v_relPos, v_shadowUv
 
 #include <bgfx_shader.sh>
 #include "cylinder.sh"
@@ -8,6 +8,7 @@ $output v_color0, v_normal, v_up, v_relPos
 // i_data1: col, row, shade
 uniform vec4 u_camChunk;    // xy: camera's chunk column and row, zw: camera minus that chunk's centre
 uniform vec4 u_grid;        // xy: chunk size in metres, z: column count
+uniform vec4 u_shadowUv;    // xy: camera's cloud-shadow uv, zw: uv per map metre
 
 void main()
 {
@@ -42,5 +43,7 @@ void main()
     v_normal = cyl_direction(n, tangent, up);
     v_up     = up;
     v_relPos = p;
+    // Rigid footprint: shadow by the vertex's map position, ignoring the tiny tilt.
+    v_shadowUv = u_shadowUv.xy + (origin + q.xy) * u_shadowUv.zw;
     gl_Position = mul(u_viewProj, vec4(p, 1.0));
 }

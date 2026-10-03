@@ -78,6 +78,13 @@ bool WorldRenderer::create(const world::WorldData& w)
     u_material  = bgfx::createUniform("u_material",  bgfx::UniformType::Vec4);
     u_fog       = bgfx::createUniform("u_fog",       bgfx::UniformType::Vec4);
     u_fog_color = bgfx::createUniform("u_fogColor",  bgfx::UniformType::Vec4);
+    u_shadow_uv    = bgfx::createUniform("u_shadowUv",    bgfx::UniformType::Vec4);
+    u_cloud_shadow = bgfx::createUniform("u_cloudShadow", bgfx::UniformType::Vec4);
+    s_cloud_shadow = bgfx::createUniform("s_cloudShadow", bgfx::UniformType::Sampler);
+    {
+        const uint8_t zero = 0;
+        m_no_shadow = bgfx::createTexture2D(1, 1, false, 1, bgfx::TextureFormat::R8, 0, bgfx::copy(&zero, 1));
+    }
 
     const bgfx::VertexLayout layout = terrain_layout();
 
@@ -157,6 +164,10 @@ void WorldRenderer::destroy()
     destroy_handle(u_material);
     destroy_handle(u_fog);
     destroy_handle(u_fog_color);
+    destroy_handle(u_shadow_uv);
+    destroy_handle(u_cloud_shadow);
+    destroy_handle(s_cloud_shadow);
+    destroy_handle(m_no_shadow);
 }
 
 void WorldRenderer::submit(bgfx::ViewId view, const CameraPos& cam_in, bool reversed_z) const
@@ -172,6 +183,21 @@ void WorldRenderer::submit(bgfx::ViewId view, const CameraPos& cam_in, bool reve
     const float fog_u[4]    = {fog.density, fog.opaque, fog.clear, 0};
     const float fog_color[4] = {((k_fog_rgba >> 24) & 0xff) / 255.0f, ((k_fog_rgba >> 16) & 0xff) / 255.0f,
                                 ((k_fog_rgba >> 8) & 0xff) / 255.0f, 1.0f};
+    // Shadow uv at the camera, taken modulo 1 in double so the per-vertex offset
+    // added in the shader stays small.
+    const bool  has_shadow = bgfx::isValid(cloud_shadow.texture) && cloud_shadow.strength > 0;
+    const bgfx::TextureHandle shadow_tex = has_shadow ? cloud_shadow.texture : m_no_shadow;
+    const double su = (cam.x - cloud_shadow.offset_x) / m_map_w;
+    const double sv = (cam.y - cloud_shadow.offset_y) / m_map_h;
+    const float shadow_uv[4] = {static_cast<float>(su - std::floor(su)), static_cast<float>(sv - std::floor(sv)),
+                                static_cast<float>(1.0 / m_map_w), static_cast<float>(1.0 / m_map_h)};
+    const float shadow_k[4]  = {has_shadow ? cloud_shadow.strength : 0.0f, 0, 0, 0};
+    auto bind_shadow = [&] {
+        bgfx::setUniform(u_shadow_uv, shadow_uv);
+        bgfx::setUniform(u_cloud_shadow, shadow_k);
+        bgfx::setTexture(0, s_cloud_shadow, shadow_tex);
+    };
+
     const float lit[4]      = {0, 0, 0, 0};
     const float emissive[4] = {1, 0, 0, 0};
 
@@ -182,6 +208,7 @@ void WorldRenderer::submit(bgfx::ViewId view, const CameraPos& cam_in, bool reve
         bgfx::setUniform(u_cylinder, cylinder);
         bgfx::setUniform(u_fog, fog_u);
         bgfx::setUniform(u_fog_color, fog_color);
+        bind_shadow();
         bgfx::setUniform(u_material, lit);
         bgfx::setUniform(u_offset, offset);
         bgfx::setVertexBuffer(0, g.vb);
@@ -197,6 +224,7 @@ void WorldRenderer::submit(bgfx::ViewId view, const CameraPos& cam_in, bool reve
         bgfx::setUniform(u_cylinder, cylinder);
         bgfx::setUniform(u_fog, fog_u);
         bgfx::setUniform(u_fog_color, fog_color);
+        bind_shadow();
         bgfx::setUniform(u_material, emissive);
         bgfx::setUniform(u_offset, offset);
         bgfx::setVertexBuffer(0, m_column_vb);
@@ -219,6 +247,7 @@ void WorldRenderer::submit(bgfx::ViewId view, const CameraPos& cam_in, bool reve
         bgfx::setUniform(u_cylinder, cylinder);
         bgfx::setUniform(u_fog, fog_u);
         bgfx::setUniform(u_fog_color, fog_color);
+        bind_shadow();
         bgfx::setUniform(u_material, lit);
         bgfx::setUniform(u_cam_chunk, cam_chunk);
         bgfx::setUniform(u_grid, grid);

@@ -18,6 +18,7 @@
 #include "game/player.h"
 #include "physics/collision_world.h"
 #include "physics/rotating_frame.h"
+#include "render/cloud_renderer.h"
 #include "render/world_renderer.h"
 #include "world/world_loader.h"
 #include "world/wrap.h"
@@ -36,6 +37,7 @@ enum class Screen { Title, Menu, Game };
 
 // Scene state — created once on first Game entry, destroyed on shutdown.
 static render::WorldRenderer g_world;
+static render::CloudRenderer g_clouds;
 static bool                  g_scene_loaded = false;
 static bool                  g_load_failed  = false;
 static int                   g_load_wait    = 0;   // frames the LOADING card has been up
@@ -69,7 +71,8 @@ static double           g_map_h           = 0.0;
 // Drop-down Ruby console (Shift+`) and the game state its commands can reach.
 static debug::Console   g_console;
 static debug::DebugHost g_debug_host;
-static std::vector<const char*> g_console_lines;   // --console, run once the world loads
+struct StartupLine { const char* code; bool show; };
+static std::vector<StartupLine> g_console_lines;   // --console / --exec, run once the world loads
 
 // --shot: render one frame of the world to a PNG and exit (for headless checks).
 static const char* g_shot_path = nullptr;
@@ -153,6 +156,11 @@ static bool load_scene()
     g_frame = physics::RotatingFrame::for_radius(m.radius);
     const uint64_t t3 = SDL_GetTicksNS();
 
+    // Clouds are decoration: without them the world still runs.
+    if (!g_clouds.create(m.radius, m.map_w, m.map_h))
+        fprintf(stderr, "load_scene: cloud shaders missing; no clouds\n");
+    const uint64_t t4 = SDL_GetTicksNS();
+
     // Start on a street near the middle of the map, or wherever --pos says.
     double px = 0.5 * m.map_w, py = 0.5 * m.map_h, palt = 0;
     if (g_cam_from_args) {
@@ -169,10 +177,12 @@ static bool load_scene()
 
     const render::WorldStats& st = g_world.stats();
     printf("world: %zu chunks, %llu terrain tris in %u draws, %llu buildings in %u draws, "
-           "%zu monuments; loaded in %.2f s, uploaded in %.2f s, collision in %.2f s\n",
+           "%zu monuments; loaded in %.2f s, uploaded in %.2f s, collision in %.2f s\n"
+           "clouds: %zu clouds, %zu puffs, generated in %.2f s\n",
            m.chunks.size(), static_cast<unsigned long long>(st.terrain_triangles), st.terrain_draws,
            static_cast<unsigned long long>(st.building_instances), st.building_draws,
-           world->monument_count, (t1 - t0) * 1e-9, (t2 - t1) * 1e-9, (t3 - t2) * 1e-9);
+           world->monument_count, (t1 - t0) * 1e-9, (t2 - t1) * 1e-9, (t3 - t2) * 1e-9,
+           g_clouds.cloud_count(), g_clouds.puff_count(), (t4 - t3) * 1e-9);
     return true;
 }
 
@@ -288,7 +298,13 @@ static void render_scene()
                        reversed_z ? 0.0f : 1.0f, 0);
     // setViewTransform is per-view and persists for all draws to view 0 this frame.
     bgfx::setViewTransform(0, view, proj);
+    g_world.cloud_shadow.texture  = g_clouds.enabled ? g_clouds.shadow_texture()
+                                                     : bgfx::TextureHandle BGFX_INVALID_HANDLE;
+    g_world.cloud_shadow.offset_x = g_clouds.offset_x();
+    g_world.cloud_shadow.offset_y = g_clouds.offset_y();
     g_world.submit(0, g_cam, reversed_z);
+    // Blended, so bgfx sorts it after the opaque world within the view.
+    g_clouds.submit(0, g_cam, reversed_z, g_world.fog);
 }
 
 // -----------------------------------------------------------------------
@@ -297,6 +313,7 @@ static void render_scene()
 
 static void free_scene()
 {
+    g_clouds.destroy();
     g_world.destroy();
     g_scene_loaded = false;
 }
@@ -310,6 +327,7 @@ static void free_scene()
 //   --view <yaw> <pitch>      start orientation in degrees
 //   --noclip                  start free-flying instead of walking
 //   --console <ruby>          open the console and run a line (repeatable)
+//   --exec <ruby>             run a line without opening the console (repeatable)
 static bool parse_args(int argc, char* argv[])
 {
     for (int i = 1; i < argc; ++i) {
@@ -328,10 +346,12 @@ static bool parse_args(int argc, char* argv[])
         } else if (!strcmp(a, "--noclip")) {
             g_noclip = true;
         } else if (!strcmp(a, "--console") && i + 1 < argc) {
-            g_console_lines.push_back(argv[++i]);
+            g_console_lines.push_back({argv[++i], true});
+        } else if (!strcmp(a, "--exec") && i + 1 < argc) {
+            g_console_lines.push_back({argv[++i], false});
         } else {
             fprintf(stderr, "usage: %s [--shot file.png] [--pos x y alt] [--view yaw pitch] "
-                            "[--noclip] [--console ruby]...\n",
+                            "[--noclip] [--console ruby]... [--exec ruby]...\n",
                     argv[0]);
             return false;
         }
@@ -416,7 +436,7 @@ int main(int argc, char* argv[])
     if (g_console.create()) {
         g_debug_host = {&g_cam, &g_cam_yaw, &g_cam_pitch, k_pitch_max, &g_fly_speed,
                         g_cylinder_radius, g_map_h, &g_world, &running,
-                        &g_registry, &g_player, &g_noclip, &g_collision, &g_frame};
+                        &g_registry, &g_player, &g_noclip, &g_collision, &g_frame, &g_clouds};
         debug::install_bindings(g_console, g_debug_host);
     }
 
@@ -492,7 +512,8 @@ int main(int argc, char* argv[])
                 }
             }
             // Mouselook: accumulate relative mouse motion while in-game.
-            if (ev.type == SDL_EVENT_MOUSE_MOTION && screen == Screen::Game) {
+            // --shot frames are scripted; a live mouse must not swing the camera.
+            if (ev.type == SDL_EVENT_MOUSE_MOTION && screen == Screen::Game && !g_shot_path) {
                 g_cam_yaw   += ev.motion.xrel * k_mouse_sens;
                 g_cam_pitch -= ev.motion.yrel * k_mouse_sens;
                 g_cam_yaw    = std::remainder(g_cam_yaw, bx::kPi2);   // keep in [-π, π]
@@ -549,8 +570,8 @@ int main(int argc, char* argv[])
                         g_scene_loaded = load_scene();
                         g_load_failed  = !g_scene_loaded;
                         // After the load, so commands see the manifest's map bounds.
-                        for (const char* line : g_console_lines)
-                            g_console.run_line(line, window);
+                        for (const StartupLine& line : g_console_lines)
+                            g_console.run_line(line.code, window, line.show);
                         last_ticks     = SDL_GetTicksNS();   // don't fly off on the long frame
                     }
                 } else if (g_load_failed) {
@@ -560,6 +581,7 @@ int main(int argc, char* argv[])
                 }
 
                 if (g_scene_loaded) {
+                    g_clouds.update(dt);
                     // The player keeps simulating (and falling) while the console is
                     // open; it just doesn't hear the keyboard.
                     const bool take_input = !g_shot_path && !g_console.is_open();

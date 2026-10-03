@@ -1,10 +1,11 @@
-$input v_color0, v_normal, v_up, v_relPos
+$input v_color0, v_normal, v_up, v_relPos, v_shadowUv
 
 #include <bgfx_shader.sh>
+#include "fog.sh"
 
-uniform vec4 u_material;    // x: 1 = emissive (the light column), 0 = lit
-uniform vec4 u_fog;         // x: density per metre, y: opaque distance, z: clear distance
-uniform vec4 u_fogColor;
+uniform vec4 u_material;      // x: 1 = emissive (the light column), 0 = lit
+uniform vec4 u_cloudShadow;   // x: shadow strength (0 = off)
+SAMPLER2D(s_cloudShadow, 0);  // fraction of the column hidden by cloud, over the map
 
 void main()
 {
@@ -15,21 +16,15 @@ void main()
     // most of it, faces looking along the axis catch its oblique run, and faces
     // looking around the circumference see it edge-on and get mostly ambient. The
     // small tangent term only separates the two circumferential wall directions.
-    vec3  side  = cross(up, vec3(0.0, 0.0, 1.0));
-    float light = 0.38
-                + 0.55 * max(dot(n, up), 0.0)
-                + 0.18 * abs(n.z)
-                + 0.08 * dot(n, side);
+    // Cloud shadow dims the column's share, not the ambient.
+    vec3  side   = cross(up, vec3(0.0, 0.0, 1.0));
+    float shadow = min(texture2D(s_cloudShadow, v_shadowUv).r * u_cloudShadow.x, 1.0);
+    float light  = 0.38
+                 + (0.55 * max(dot(n, up), 0.0)
+                    + 0.18 * abs(n.z)
+                    + 0.08 * dot(n, side)) * (1.0 - shadow);
     vec3 col = v_color0.rgb * mix(light, 1.0, u_material.x);
 
-    float dist = length(v_relPos);
-    // Exponential haze rescaled so it reaches exactly 1 at the opaque distance;
-    // a bare exponential only approaches it.
-    float span = u_fog.y - u_fog.z;
-    float fog  = (1.0 - exp(-max(dist - u_fog.z, 0.0) * u_fog.x))
-               / (1.0 - exp(-span * u_fog.x));
-    fog = min(fog, 1.0);
-    fog *= 1.0 - 0.7 * u_material.x;
-
+    float fog = fog_amount(length(v_relPos)) * (1.0 - 0.7 * u_material.x);
     gl_FragColor = vec4(mix(col, u_fogColor.rgb, fog), 1.0);
 }

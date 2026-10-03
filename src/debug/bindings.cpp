@@ -16,6 +16,7 @@
 #include "game/player.h"
 #include "physics/collision_world.h"
 #include "physics/rotating_frame.h"
+#include "render/cloud_renderer.h"
 #include "render/world_renderer.h"
 #include "world/wrap.h"
 
@@ -227,6 +228,88 @@ mrb_value fog_reset(mrb_state*, mrb_value)
     return mrb_nil_value();
 }
 
+// -- Clouds --------------------------------------------------------------------
+// Shape parameters regenerate the field (~0.7 s); wind and shadow apply live.
+
+#define CLOUD_PARAM(name, field, check, msg)                                         \
+    mrb_value clouds_##name(mrb_state* mrb, mrb_value)                               \
+    {                                                                                \
+        return mrb_float_value(mrb, g_host->clouds->params().field);                 \
+    }                                                                                \
+    mrb_value clouds_set_##name(mrb_state* mrb, mrb_value)                           \
+    {                                                                                \
+        const mrb_float v = arg_float(mrb);                                          \
+        if (!(check)) mrb_raise(mrb, E_ARGUMENT_ERROR, msg);                         \
+        world::CloudParams p = g_host->clouds->params();                             \
+        p.field = static_cast<float>(v);                                             \
+        g_host->clouds->set_params(p);                                               \
+        return mrb_float_value(mrb, v);                                              \
+    }
+
+CLOUD_PARAM(coverage, coverage, v >= 0 && v <= 0.6, "coverage must be within 0..0.6")
+CLOUD_PARAM(alt, base_alt, v >= 200 && v <= 3000, "alt must be within 200..3000")
+CLOUD_PARAM(lean, lean, v >= -1 && v <= 1, "lean must be within -1..1")
+#undef CLOUD_PARAM
+
+mrb_value clouds_seed(mrb_state* mrb, mrb_value)
+{
+    return mrb_int_value(mrb, static_cast<mrb_int>(g_host->clouds->params().seed));
+}
+
+mrb_value clouds_set_seed(mrb_state* mrb, mrb_value)
+{
+    mrb_int v;
+    mrb_get_args(mrb, "i", &v);
+    world::CloudParams p = g_host->clouds->params();
+    p.seed = static_cast<uint32_t>(v);
+    g_host->clouds->set_params(p);
+    return mrb_int_value(mrb, v);
+}
+
+mrb_value clouds_wind(mrb_state* mrb, mrb_value)
+{
+    const world::CloudParams& p = g_host->clouds->params();
+    const mrb_value v[2] = {mrb_float_value(mrb, p.wind_x), mrb_float_value(mrb, p.wind_y)};
+    return mrb_ary_new_from_values(mrb, 2, v);
+}
+
+// Clouds.set_wind(spinward, axial), m/s. Doesn't regenerate.
+mrb_value clouds_set_wind(mrb_state* mrb, mrb_value)
+{
+    mrb_float wx, wy;
+    mrb_get_args(mrb, "ff", &wx, &wy);
+    g_host->clouds->set_wind(static_cast<float>(wx), static_cast<float>(wy));
+    return clouds_wind(mrb, mrb_nil_value());
+}
+
+mrb_value clouds_shadow(mrb_state* mrb, mrb_value) { return mrb_float_value(mrb, g_host->world->cloud_shadow.strength); }
+
+mrb_value clouds_set_shadow(mrb_state* mrb, mrb_value)
+{
+    const mrb_float v = arg_float(mrb);
+    if (v < 0 || v > 4) mrb_raise(mrb, E_ARGUMENT_ERROR, "shadow must be within 0..4");
+    g_host->world->cloud_shadow.strength = static_cast<float>(v);
+    return mrb_float_value(mrb, v);
+}
+
+mrb_value clouds_enabled(mrb_state*, mrb_value) { return mrb_bool_value(g_host->clouds->enabled); }
+
+mrb_value clouds_set_enabled(mrb_state* mrb, mrb_value)
+{
+    mrb_bool on;
+    mrb_get_args(mrb, "b", &on);
+    g_host->clouds->enabled = on;
+    return mrb_bool_value(on);
+}
+
+mrb_value clouds_count(mrb_state* mrb, mrb_value)
+{
+    const mrb_value v[3] = {mrb_int_value(mrb, static_cast<mrb_int>(g_host->clouds->cloud_count())),
+                            mrb_int_value(mrb, static_cast<mrb_int>(g_host->clouds->puff_count())),
+                            mrb_int_value(mrb, static_cast<mrb_int>(g_host->clouds->drawn_puffs()))};
+    return mrb_ary_new_from_values(mrb, 3, v);
+}
+
 // -- Misc --------------------------------------------------------------------
 
 mrb_value screenshot(mrb_state* mrb, mrb_value)
@@ -285,6 +368,16 @@ module Player
   end
 end
 
+module Clouds
+  def self.inspect
+    clouds, puffs, drawn = counts
+    wx, wy = wind
+    format("#<Clouds %d clouds, %d puffs (%d drawn) coverage=%.2f alt=%.0f lean=%.2f " \
+           "wind=(%.1f, %.1f) shadow=%.2f seed=%d%s>",
+           clouds, puffs, drawn, coverage, alt, lean, wx, wy, shadow, seed, enabled ? "" : " off")
+  end
+end
+
 module Fog
   def self.inspect
     format("#<Fog density=%g opaque=%.0f clear=%.0f>", density, opaque, clear)
@@ -314,6 +407,7 @@ def help
     Player.drop(x, y)           put the player on the nearest street near (x, y)
     Player.simulate(secs, forward: 1, right: 0, sprint: false, jump: false)   run physics now
     Fog                         haze; Fog.density .opaque .clear (settable), Fog.reset
+    Clouds                      .coverage .alt .lean .seed (regenerate), .shadow .enabled, .set_wind(x, y)
     screenshot("file.png")      save the next frame (console included)
     clear                       clear this console      quit    exit the game
     Keys: Enter run, Up/Down history, PgUp/PgDn or wheel scroll, Ctrl+C cancel block,
@@ -354,6 +448,17 @@ void install_bindings(Console& console, DebugHost& host)
     define_accessor(mrb, player, "noclip", player_noclip, player_set_noclip);
     mrb_define_module_function(mrb, player, "drop", player_drop, MRB_ARGS_REQ(2));
     mrb_define_module_function(mrb, player, "__simulate", player_simulate, MRB_ARGS_REQ(5));
+
+    RClass* clouds = mrb_define_module(mrb, "Clouds");
+    define_accessor(mrb, clouds, "coverage", clouds_coverage, clouds_set_coverage);
+    define_accessor(mrb, clouds, "alt", clouds_alt, clouds_set_alt);
+    define_accessor(mrb, clouds, "lean", clouds_lean, clouds_set_lean);
+    define_accessor(mrb, clouds, "seed", clouds_seed, clouds_set_seed);
+    define_accessor(mrb, clouds, "shadow", clouds_shadow, clouds_set_shadow);
+    define_accessor(mrb, clouds, "enabled", clouds_enabled, clouds_set_enabled);
+    mrb_define_module_function(mrb, clouds, "wind", clouds_wind, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, clouds, "set_wind", clouds_set_wind, MRB_ARGS_REQ(2));
+    mrb_define_module_function(mrb, clouds, "counts", clouds_count, MRB_ARGS_NONE());
 
     console.eval_startup(k_ruby_helpers);
 }

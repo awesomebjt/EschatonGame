@@ -131,6 +131,7 @@ bgfx_compile_shaders(
     SHADERS     ${SHADER_SRC_DIR}/vs_terrain.sc
                 ${SHADER_SRC_DIR}/vs_building.sc
                 ${SHADER_SRC_DIR}/vs_overlay.sc
+                ${SHADER_SRC_DIR}/vs_cloud.sc
     VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
     INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
@@ -141,6 +142,7 @@ bgfx_compile_shaders(
     TYPE        FRAGMENT
     SHADERS     ${SHADER_SRC_DIR}/fs_world.sc
                 ${SHADER_SRC_DIR}/fs_overlay.sc
+                ${SHADER_SRC_DIR}/fs_cloud.sc
     VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
     INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
@@ -151,6 +153,9 @@ bgfx_compile_shaders(
 # include rebuild its users too.
 foreach(out ${VS_OUTPUT_FILES})
     add_custom_command(OUTPUT ${out} APPEND DEPENDS ${SHADER_SRC_DIR}/cylinder.sh)
+endforeach()
+foreach(out ${FS_OUTPUT_FILES})
+    add_custom_command(OUTPUT ${out} APPEND DEPENDS ${SHADER_SRC_DIR}/fog.sh)
 endforeach()
 
 add_custom_target(compile_shaders ALL DEPENDS ${VS_OUTPUT_FILES} ${FS_OUTPUT_FILES})
@@ -166,8 +171,10 @@ add_executable(eschaton
     src/game/player.cpp
     src/physics/character.cpp
     src/physics/collision_world.cpp
+    src/render/cloud_renderer.cpp
     src/render/shader.cpp
     src/render/world_renderer.cpp
+    src/world/clouds.cpp
     src/world/formats.cpp
     src/world/world_loader.cpp
 )
@@ -214,6 +221,7 @@ add_executable(physics_check EXCLUDE_FROM_ALL
     src/game/player.cpp
     src/physics/character.cpp
     src/physics/collision_world.cpp
+    src/world/clouds.cpp
     src/world/formats.cpp
     src/world/world_loader.cpp
 )
@@ -221,6 +229,9 @@ target_compile_definitions(physics_check PRIVATE WORLD_DIR="${CMAKE_SOURCE_DIR}/
 target_include_directories(physics_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # bgfx only for headers (CameraPos lives beside the renderer).
 target_link_libraries(physics_check PRIVATE Threads::Threads EnTT::EnTT bgfx)
+
+add_executable(clouds_check EXCLUDE_FROM_ALL tests/clouds_check.cpp src/world/clouds.cpp)
+target_include_directories(clouds_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # ---------------------------------------------------------------------------
 # Install (optional, for packaging later)
