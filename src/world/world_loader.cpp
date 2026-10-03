@@ -168,6 +168,7 @@ std::optional<WorldData> load_world(const std::string& dir)
     std::vector<std::vector<std::vector<BuildingInstance>>> group_buildings(
         members.size(), std::vector<std::vector<BuildingInstance>>(type_count));
     std::vector<size_t> group_monuments(members.size(), 0);
+    w.collision.resize(m.chunks.size());
     std::atomic<size_t> next{0};
     std::atomic<bool>   failed{false};
 
@@ -187,6 +188,15 @@ std::optional<WorldData> load_world(const std::string& dir)
                 cut_circumferential(*chunk, cut_origin, step,
                                     static_cast<float>(cx - g.centre_x),
                                     static_cast<float>(cy - g.centre_y), g.vertices, g.indices);
+
+                CollisionChunk& col = w.collision[static_cast<size_t>(e - m.chunks.data())];
+                col.i = e->i;
+                col.j = e->j;
+                col.triangles.reserve(chunk->indices.size() * 3);
+                for (uint32_t index : chunk->indices) {
+                    const float* pos = chunk->vertices[index].pos;
+                    col.triangles.insert(col.triangles.end(), pos, pos + 3);
+                }
 
                 for (size_t k = 0; k < chunk->buildings.size(); ++k) {
                     const BuildingInst& b = chunk->buildings[k];

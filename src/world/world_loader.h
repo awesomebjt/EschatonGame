@@ -29,12 +29,21 @@ struct BuildingInstance
 };
 static_assert(sizeof(BuildingInstance) == 32);
 
+// A chunk's terrain as the exporter wrote it, before the render-side cuts: flat
+// map space is what collision runs in, so the curvature subdivision isn't needed.
+struct CollisionChunk
+{
+    int                i = 0, j = 0;
+    std::vector<float> triangles;   // 9 floats per triangle, relative to the chunk centre
+};
+
 struct WorldData
 {
     Manifest                                   manifest;
     std::vector<TerrainGroup>                  groups;
     std::vector<std::vector<BuildingInstance>> buildings;    // indexed by building type
     std::vector<PrototypeMesh>                 prototypes;   // LOD0, indexed by building type
+    std::vector<CollisionChunk>                collision;    // one per manifest chunk, same order
     size_t                                     monument_count = 0;
 };
 
