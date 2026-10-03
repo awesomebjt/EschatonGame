@@ -121,16 +121,18 @@ The cylinder rotates to produce artificial gravity. Objects inside experience:
 2. **Coriolis acceleration** — `a_cor = -2ω × v` — deflects moving objects, perpendicular to both the rotation axis and the velocity vector.
 3. **Centrifugal gradient** — "gravity" decreases linearly with altitude. At the axis it is zero; at 2,000 m altitude, ~0.5g.
 
+**Spin direction:** the floor moves toward map **+x** ("spinward"); the second cylinder counter-rotates. In local map axes (x spinward, y axial, z up) that makes `a_cor = 2ω (v_z, 0, −v_x)`: moving spinward presses you into the floor, rising drifts you spinward, falling drifts you anti-spinward, and motion along the axis is untouched. Implemented in `src/physics/rotating_frame.h`.
+
 The Coriolis effect is **a core gameplay mechanic**, not a cosmetic detail. It must be perceptible and consistent for thrown objects, projectiles, falling objects, and water flow.
 
 ### Coriolis and the River
 
 Earlier drafts cautioned against circumferential rivers on the grounds that Coriolis deflection would look unnatural. The generated river runs at roughly **13° off the circumference** (five laps over 32 km), so that guidance needs restating rather than enforcing:
 
-- **Circumferential flow** puts the Coriolis term in the **radial** direction — it changes apparent weight rather than pushing the water sideways. At 2ω ≈ 0.099 m/s² per m/s, a 2 m/s current running prograde is about 2% "heavier," retrograde about 2% "lighter." Visible as a slight difference in water level against the two banks, not as deflection.
-- **Axial flow** is what gets deflected laterally, and only the small axial component (sin 13° ≈ 0.22) contributes.
+- **Circumferential flow** puts the Coriolis term in the **radial** direction — it changes apparent weight rather than pushing the water sideways. At 2ω ≈ 0.099 m/s² per m/s, a 2 m/s current running spinward is about 2% "heavier," anti-spinward about 2% "lighter."
+- **Axial flow** gets no Coriolis term at all: the velocity is parallel to the spin axis, so ω × v = 0. (Earlier drafts said axial flow is what gets deflected sideways; that was wrong.)
 
-Net effect: the helical river is physically fine. If the asymmetry is wanted as a visible detail, bias the meander model so bends develop preferentially on one bank — the generator's meander offsets are a single signed array and easy to skew.
+Net effect: horizontal flow on the floor is never pushed sideways, so the helical river is physically fine and needs no bank asymmetry. Only vertical motion (waterfalls, spray, anything thrown up or dropped) is deflected around the circumference. Biasing meanders to one bank would be a stylistic choice, not physics.
 
 ### Physics LOD
 
@@ -153,12 +155,14 @@ Rim speed = ωr ≈ 198 m/s
 
 ### Collision
 
-The exporter emits no collision meshes. Derive them:
+The exporter emits no collision meshes; `src/physics/collision_world.*` derives them at load, in **flat map space** (the rendered curvature moves a wall the player can touch by about a millimetre):
 
-- **Buildings** — footprint quad and height are in `manifest.json` per type; instance transform gives placement. Box or extruded-quad colliders are trivial to build at load.
-- **Ground and roads** — flat at z ≈ 0 (layer offsets of a few cm are cosmetic, see Rendering).
-- **Bridges** — boulevard decks ramp to 6 m over an 80 m run; treat as ramps, not steps.
-- **Water** — the river is a flat surface, not a carved channel. Bank geometry below z = 0 does not exist yet.
+- **Terrain** — the exporter's own triangles, before the render-side curvature cuts. They already include roads, roundabout platforms (1.5 m), bridge decks (ramping to 6 m over 80 m) and the baked monuments.
+- **Buildings** — each instance tested against its type's LOD0 prototype mesh rather than a footprint box, so courtyards and their 2 m × 3 m passages stay walkable.
+- **Water** — the river is a flat **solid** surface for now; there is no carved channel. Swimming comes with the water work.
+- **Map ends** — invisible walls at y = 0 and 32 km until the end caps exist.
+
+The player is an upright capsule (r 0.3 m, h 1.8 m, eyes at 1.65 m) driven by a kinematic move-and-slide controller at a fixed 120 Hz; see `src/physics/CLAUDE.md`. `./build/physics_check` (CMake target `physics_check`) runs headless scenarios against the real exported world.
 
 ---
 
@@ -552,6 +556,8 @@ eschaton/
 │   ├── textures/                # backdrop plate + height map, material maps
 │   └── world/
 │       └── cylinder_0/          # manifest.json, prototypes.bin, chunk_*.bin
+├── tests/
+│   └── physics_check.cpp        # headless player/collision scenarios (target physics_check)
 ├── tools/
 │   └── CityGenerator/            # paris_city.py, export_chunks.py, render_map.py,
 │                                  # bake_height.py, preview_network.py

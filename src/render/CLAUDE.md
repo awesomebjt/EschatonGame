@@ -25,14 +25,16 @@ lifetime/threading rules.
 - **Buildings are rigid** (tangent plane at their origin, per root CLAUDE.md); the base
   ring is sunk by x² / 2R + 0.1 m so wide footprints meet the curving floor.
 - **Reversed-Z, infinite far, D32F** on [0, 1]-depth backends. Terrain layers sit 5 cm
-  apart and are seen from 8 km; standard depth z-fights from ~1 km. OpenGL
-  (`homogeneousDepth`) falls back to a normal projection with near = 2 m.
+  apart and are seen from 8 km; standard depth z-fights from ~1 km. Near plane is
+  0.05 m because the eye can be a capsule radius (0.3 m) from a wall. OpenGL
+  (`homogeneousDepth`) falls back to a normal projection with near = 0.1 m and
+  accepts distant z-fighting.
 - **Haze, not the 4–7 km fog wall.** Fog is exponential from 1.5 km, rescaled to be
   fully opaque at 7 km (`FogParams` in `world_renderer.h`, live-tunable via `WorldRenderer::fog`), so the far side is hidden
   until the backdrop shell exists. The light column is only 30% fogged so it stays
   visible end to end.
 - **`BGFX_CAPS_INSTANCING` no longer exists.** bgfx raised its renderer baseline
   (upstream 8c8b6b569) and removed caps every backend supports; no fallback needed.
-- **`--shot file.png [--pos x y alt] [--view yaw pitch] [--console ruby]...`** renders one frame and exits,
+- **`--shot file.png [--pos x y alt] [--view yaw pitch] [--noclip] [--console ruby]...`** renders one frame and exits,
   for visual checks without driving the menu. PNGs come from the bgfx callback in
   `main.cpp`.

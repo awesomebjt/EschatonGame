@@ -15,6 +15,9 @@
 
 #include "debug/bindings.h"
 #include "debug/console.h"
+#include "game/player.h"
+#include "physics/collision_world.h"
+#include "physics/rotating_frame.h"
 #include "render/world_renderer.h"
 #include "world/world_loader.h"
 #include "world/wrap.h"
@@ -37,10 +40,18 @@ static bool                  g_scene_loaded = false;
 static bool                  g_load_failed  = false;
 static int                   g_load_wait    = 0;   // frames the LOADING card has been up
 
-// Camera position in map space. Starts at the axial midpoint, 200 m off the wall;
-// set from the manifest on load unless --pos overrides it.
+// Camera position in map space. Walking, it sits at the player's eyes; in noclip
+// it flies free. --pos sets it (the player then falls from there).
 static render::CameraPos g_cam;
 static bool              g_cam_from_args = false;
+
+// The player: a capsule colliding with the static world in the rotating frame.
+static entt::registry          g_registry;
+static entt::entity            g_player = entt::null;
+static physics::CollisionWorld g_collision;
+static physics::RotatingFrame  g_frame;
+static bool                    g_noclip = false;     // F toggles free-fly
+static render::CameraPos       g_cam_written;        // camera as the player last set it
 
 // Camera orientation controlled by mouselook, relative to the local "up" (toward
 // the axis). Yaw 0 looks along the axis (+Y in map space); yaw wraps freely.
@@ -50,7 +61,7 @@ static float g_cam_pitch            = 0.0f;
 static constexpr float k_mouse_sens = 0.002f;          // radians per pixel
 static constexpr float k_pitch_max  = bx::kPiHalf;
 
-static constexpr double k_start_altitude = 200.0;      // metres off the wall
+static constexpr double k_start_altitude = 200.0;      // noclip fallback if no street is found
 static double           g_fly_speed       = 40.0;      // m/s; Shift ×10, console-settable
 static double           g_cylinder_radius = 0.0;       // from the manifest
 static double           g_map_h           = 0.0;
@@ -133,18 +144,35 @@ static bool load_scene()
     g_map_h           = m.map_h;
     g_debug_host.radius = m.radius;
     g_debug_host.map_h  = m.map_h;
-    if (!g_cam_from_args) {
-        g_cam.x   = 0.5 * m.map_w;
-        g_cam.y   = 0.5 * m.map_h;
-        g_cam.alt = k_start_altitude;
+
+    const uint64_t t2 = SDL_GetTicksNS();
+    if (!g_collision.build(*world)) {
+        fprintf(stderr, "load_scene: failed to build collision\n");
+        return false;
     }
+    g_frame = physics::RotatingFrame::for_radius(m.radius);
+    const uint64_t t3 = SDL_GetTicksNS();
+
+    // Start on a street near the middle of the map, or wherever --pos says.
+    double px = 0.5 * m.map_w, py = 0.5 * m.map_h, palt = 0;
+    if (g_cam_from_args) {
+        px   = g_cam.x;
+        py   = g_cam.y;
+        palt = g_cam.alt - game::k_eye_height;
+    } else if (!game::find_spawn(g_collision, px, py, palt)) {
+        fprintf(stderr, "load_scene: no street near the map centre; starting in noclip\n");
+        g_noclip  = true;
+        g_cam     = {px, py, k_start_altitude};
+    }
+    g_player = game::spawn_player(g_registry, m.radius, px, py, palt);
+    if (!g_noclip) g_cam = g_cam_written = game::player_eye(g_registry, g_player, m.radius);
 
     const render::WorldStats& st = g_world.stats();
     printf("world: %zu chunks, %llu terrain tris in %u draws, %llu buildings in %u draws, "
-           "%zu monuments; loaded in %.2f s, uploaded in %.2f s\n",
+           "%zu monuments; loaded in %.2f s, uploaded in %.2f s, collision in %.2f s\n",
            m.chunks.size(), static_cast<unsigned long long>(st.terrain_triangles), st.terrain_draws,
            static_cast<unsigned long long>(st.building_instances), st.building_draws,
-           world->monument_count, (t1 - t0) * 1e-9, (SDL_GetTicksNS() - t1) * 1e-9);
+           world->monument_count, (t1 - t0) * 1e-9, (t2 - t1) * 1e-9, (t3 - t2) * 1e-9);
     return true;
 }
 
@@ -187,6 +215,36 @@ static void update_camera(double dt)
     g_cam.y   = bx::clamp(g_cam.y + mz * speed, 0.0, g_map_h);
 }
 
+// Walking: feed WASD to the player's controller and put the camera at its eyes.
+static void update_player(double dt, bool take_input)
+{
+    // The console moves the camera (teleport, Camera.x = ...); carry the player along.
+    if (g_cam.x != g_cam_written.x || g_cam.y != g_cam_written.y || g_cam.alt != g_cam_written.alt)
+        game::place_player(g_registry, g_player, g_cylinder_radius, g_cam.x, g_cam.y,
+                           g_cam.alt - game::k_eye_height);
+
+    game::PlayerInput in;
+    in.yaw = g_cam_yaw;
+    if (take_input) {
+        const bool* keys = SDL_GetKeyboardState(nullptr);
+        in.forward = float(keys[SDL_SCANCODE_W]) - float(keys[SDL_SCANCODE_S]);
+        in.right   = float(keys[SDL_SCANCODE_D]) - float(keys[SDL_SCANCODE_A]);
+        in.sprint  = keys[SDL_SCANCODE_LSHIFT];
+    }
+    game::update_player(g_registry, g_player, in, g_collision, g_frame, g_map_h, dt);
+    g_cam = g_cam_written = game::player_eye(g_registry, g_player, g_cylinder_radius);
+}
+
+static void set_noclip(bool on)
+{
+    if (g_noclip == on || g_player == entt::null) return;
+    // Leaving noclip drops the player in where the camera is.
+    if (!on)
+        game::place_player(g_registry, g_player, g_cylinder_radius, g_cam.x, g_cam.y,
+                           g_cam.alt - game::k_eye_height);
+    g_noclip = on;
+}
+
 // -----------------------------------------------------------------------
 // Scene rendering (called each Game frame)
 // -----------------------------------------------------------------------
@@ -209,6 +267,12 @@ static void render_scene()
     const bx::Vec3 up {-sp * sy, cp, -sp * cy};
     bx::mtxLookAt(view, eye, at, up);
 
+    // The eye can be a capsule radius (0.3 m) from a wall, so the near plane must be
+    // well inside that. Reversed-Z float depth doesn't mind; plain GL depth does,
+    // and accepts distant z-fighting as the price.
+    constexpr float k_near    = 0.05f;
+    constexpr float k_near_gl = 0.1f;
+
     // Reversed-Z with an infinite far plane where depth is [0, 1]: terrain layers
     // sit 5 cm apart and are visible 8 km away, far past what standard depth
     // resolves. OpenGL's [-1, 1] range defeats the trick, so it gets a plain
@@ -216,9 +280,9 @@ static void render_scene()
     const bool  reversed_z = !bgfx::getCaps()->homogeneousDepth;
     const float aspect = static_cast<float>(k_width) / static_cast<float>(k_height);
     if (reversed_z)
-        bx::mtxProjInf(proj, 70.0f, aspect, 0.5f, false, bx::Handedness::Left, bx::NearFar::Reverse);
+        bx::mtxProjInf(proj, 70.0f, aspect, k_near, false, bx::Handedness::Left, bx::NearFar::Reverse);
     else
-        bx::mtxProj(proj, 70.0f, aspect, 2.0f, 40000.0f, true);
+        bx::mtxProj(proj, 70.0f, aspect, k_near_gl, 40000.0f, true);
 
     bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, render::k_fog_rgba,
                        reversed_z ? 0.0f : 1.0f, 0);
@@ -244,6 +308,7 @@ static void free_scene()
 //   --shot <file.png>         render the world once, save a screenshot, exit
 //   --pos <x> <y> <alt>       start position in map metres
 //   --view <yaw> <pitch>      start orientation in degrees
+//   --noclip                  start free-flying instead of walking
 //   --console <ruby>          open the console and run a line (repeatable)
 static bool parse_args(int argc, char* argv[])
 {
@@ -260,11 +325,13 @@ static bool parse_args(int argc, char* argv[])
             g_cam_yaw   = bx::toRad(static_cast<float>(atof(argv[++i])));
             g_cam_pitch = bx::clamp(bx::toRad(static_cast<float>(atof(argv[++i]))),
                                     -k_pitch_max, k_pitch_max);
+        } else if (!strcmp(a, "--noclip")) {
+            g_noclip = true;
         } else if (!strcmp(a, "--console") && i + 1 < argc) {
             g_console_lines.push_back(argv[++i]);
         } else {
             fprintf(stderr, "usage: %s [--shot file.png] [--pos x y alt] [--view yaw pitch] "
-                            "[--console ruby]...\n",
+                            "[--noclip] [--console ruby]...\n",
                     argv[0]);
             return false;
         }
@@ -348,15 +415,10 @@ int main(int argc, char* argv[])
     bool running = true;
     if (g_console.create()) {
         g_debug_host = {&g_cam, &g_cam_yaw, &g_cam_pitch, k_pitch_max, &g_fly_speed,
-                        g_cylinder_radius, g_map_h, &g_world, &running};
+                        g_cylinder_radius, g_map_h, &g_world, &running,
+                        &g_registry, &g_player, &g_noclip, &g_collision, &g_frame};
         debug::install_bindings(g_console, g_debug_host);
     }
-
-    // ---------------------------------------------------------------
-    // ECS registry (populated in later steps)
-    // ---------------------------------------------------------------
-    entt::registry registry;
-    (void)registry;
 
     // ---------------------------------------------------------------
     // UI state
@@ -420,6 +482,11 @@ int main(int argc, char* argv[])
                         if (sc == SDL_SCANCODE_ESCAPE) {
                             screen = Screen::Menu;
                             SDL_SetWindowRelativeMouseMode(window, false);
+                        } else if (sc == SDL_SCANCODE_F && !ev.key.repeat) {
+                            set_noclip(!g_noclip);
+                        } else if (sc == SDL_SCANCODE_SPACE && !ev.key.repeat && !g_noclip
+                                   && g_player != entt::null) {
+                            game::queue_jump(g_registry, g_player);
                         }
                         break;
                 }
@@ -493,7 +560,14 @@ int main(int argc, char* argv[])
                 }
 
                 if (g_scene_loaded) {
-                    if (!g_shot_path && !g_console.is_open()) update_camera(dt);
+                    // The player keeps simulating (and falling) while the console is
+                    // open; it just doesn't hear the keyboard.
+                    const bool take_input = !g_shot_path && !g_console.is_open();
+                    if (g_noclip) {
+                        if (take_input) update_camera(dt);
+                    } else {
+                        update_player(dt, take_input);
+                    }
                     render_scene();
 
                     const bgfx::Stats* st = bgfx::getStats();
@@ -506,7 +580,15 @@ int main(int argc, char* argv[])
                         "frame %5.2f ms  gpu %5.2f ms  %u draws",
                         g_cam.x, g_cam.y, g_cam.alt, bx::toDeg(g_cam_yaw), bx::toDeg(g_cam_pitch),
                         cpu_ms, gpu_ms, st->numDraw);
-                    bgfx::dbgTextPrintf(1, 2, 0x07, "WASD fly, Space/C up/down, Shift fast, Esc menu");
+                    if (g_noclip) {
+                        bgfx::dbgTextPrintf(1, 2, 0x07, "NOCLIP  WASD fly, Space/C up/down, Shift fast, F walk, Esc menu");
+                    } else {
+                        const game::PlayerView pv = game::player_view(g_registry, g_player, g_cylinder_radius);
+                        bgfx::dbgTextPrintf(1, 2, 0x07, "WALK %s %4.1f m/s  WASD move, Space jump, Shift sprint, "
+                                            "F noclip, Esc menu",
+                                            pv.grounded ? "grounded" : "airborne ",
+                                            std::hypot(pv.v[0], pv.v[1]));
+                    }
 
                     // --shot: let a few frames settle, capture, wait for the
                     // render thread to hand the image back, then exit.

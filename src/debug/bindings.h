@@ -2,6 +2,9 @@
 
 #include <cstdint>
 
+#include <entt/entity/fwd.hpp>
+
+namespace physics { class CollisionWorld; struct RotatingFrame; }
 namespace render { struct CameraPos; class WorldRenderer; }
 
 namespace debug {
@@ -21,9 +24,16 @@ struct DebugHost
     double                 map_h     = 0;
     render::WorldRenderer* world     = nullptr;
     bool*                  running   = nullptr;
+
+    // Player (null until the world loads).
+    entt::registry*                 registry  = nullptr;
+    entt::entity*                   player    = nullptr;
+    bool*                           noclip    = nullptr;
+    const physics::CollisionWorld*  collision = nullptr;
+    const physics::RotatingFrame*   frame     = nullptr;
 };
 
-// Defines Camera, Fog and the top-level helpers (teleport, look, screenshot,
+// Defines Camera, Player, Fog and the top-level helpers (teleport, look, screenshot,
 // quit, help, clear) in the console's VM.
 void install_bindings(Console& console, DebugHost& host);
 

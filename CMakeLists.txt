@@ -163,6 +163,9 @@ add_executable(eschaton
     src/core/json.cpp
     src/debug/bindings.cpp
     src/debug/console.cpp
+    src/game/player.cpp
+    src/physics/character.cpp
+    src/physics/collision_world.cpp
     src/render/shader.cpp
     src/render/world_renderer.cpp
     src/world/formats.cpp
@@ -201,6 +204,23 @@ target_link_libraries(eschaton PRIVATE
 target_include_directories(eschaton PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
+
+# ---------------------------------------------------------------------------
+# Headless physics checks against the exported world (no window or GPU)
+# ---------------------------------------------------------------------------
+add_executable(physics_check EXCLUDE_FROM_ALL
+    tests/physics_check.cpp
+    src/core/json.cpp
+    src/game/player.cpp
+    src/physics/character.cpp
+    src/physics/collision_world.cpp
+    src/world/formats.cpp
+    src/world/world_loader.cpp
+)
+target_compile_definitions(physics_check PRIVATE WORLD_DIR="${CMAKE_SOURCE_DIR}/world")
+target_include_directories(physics_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
+# bgfx only for headers (CameraPos lives beside the renderer).
+target_link_libraries(physics_check PRIVATE Threads::Threads EnTT::EnTT bgfx)
 
 # ---------------------------------------------------------------------------
 # Install (optional, for packaging later)

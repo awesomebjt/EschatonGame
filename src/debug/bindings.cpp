@@ -10,7 +10,12 @@
 #include <mruby/array.h>
 #include <mruby/string.h>
 
+#include <entt/entt.hpp>
+
 #include "debug/console.h"
+#include "game/player.h"
+#include "physics/collision_world.h"
+#include "physics/rotating_frame.h"
 #include "render/world_renderer.h"
 #include "world/wrap.h"
 
@@ -89,6 +94,99 @@ mrb_value cam_set_speed(mrb_state* mrb, mrb_value)
     if (v <= 0) mrb_raise(mrb, E_ARGUMENT_ERROR, "speed must be positive");
     *g_host->fly_speed = v;
     return mrb_float_value(mrb, v);
+}
+
+// -- Player ------------------------------------------------------------------
+
+bool player_ready()
+{
+    return g_host->registry && g_host->player && g_host->registry->valid(*g_host->player);
+}
+
+void require_player(mrb_state* mrb)
+{
+    if (!player_ready()) mrb_raise(mrb, E_RUNTIME_ERROR, "no player yet (world not loaded)");
+}
+
+mrb_value vec3_value(mrb_state* mrb, double a, double b, double c)
+{
+    const mrb_value v[3] = {mrb_float_value(mrb, a), mrb_float_value(mrb, b), mrb_float_value(mrb, c)};
+    return mrb_ary_new_from_values(mrb, 3, v);
+}
+
+mrb_value player_pos(mrb_state* mrb, mrb_value)
+{
+    require_player(mrb);
+    const game::PlayerView v = game::player_view(*g_host->registry, *g_host->player, g_host->radius);
+    return vec3_value(mrb, v.x, v.y, v.alt);
+}
+
+mrb_value player_vel(mrb_state* mrb, mrb_value)
+{
+    require_player(mrb);
+    const game::PlayerView v = game::player_view(*g_host->registry, *g_host->player, g_host->radius);
+    return vec3_value(mrb, v.v[0], v.v[1], v.v[2]);
+}
+
+mrb_value player_grounded(mrb_state* mrb, mrb_value)
+{
+    require_player(mrb);
+    return mrb_bool_value(game::player_view(*g_host->registry, *g_host->player, g_host->radius).grounded);
+}
+
+mrb_value player_noclip(mrb_state*, mrb_value) { return mrb_bool_value(g_host->noclip && *g_host->noclip); }
+
+mrb_value player_set_noclip(mrb_state* mrb, mrb_value)
+{
+    mrb_bool on;
+    mrb_get_args(mrb, "b", &on);
+    require_player(mrb);
+    // Same as the F key: leaving noclip drops the player in at the camera.
+    if (*g_host->noclip && !on) {
+        const render::CameraPos& c = *g_host->cam;
+        game::place_player(*g_host->registry, *g_host->player, g_host->radius, c.x, c.y,
+                           c.alt - game::k_eye_height);
+    }
+    *g_host->noclip = on;
+    return mrb_bool_value(on);
+}
+
+// Player.drop(x, y): nearest street-level spot, at rest.
+mrb_value player_drop(mrb_state* mrb, mrb_value)
+{
+    mrb_float x, y;
+    mrb_get_args(mrb, "ff", &x, &y);
+    require_player(mrb);
+    double px = x, py = y, alt = 0;
+    if (!game::find_spawn(*g_host->collision, px, py, alt))
+        mrb_raise(mrb, E_RUNTIME_ERROR, "no street-level ground within 400 m");
+    game::place_player(*g_host->registry, *g_host->player, g_host->radius, px, py, alt);
+    *g_host->noclip = false;
+    // The camera must agree, or the walk loop reads it as a console teleport.
+    *g_host->cam = game::player_eye(*g_host->registry, *g_host->player, g_host->radius);
+    return vec3_value(mrb, px, py, alt);
+}
+
+// Player.__simulate(seconds, forward, right, sprint, jump): advance the player's
+// physics right now, with the current yaw. Headless testing of movement.
+mrb_value player_simulate(mrb_state* mrb, mrb_value)
+{
+    mrb_float secs, fwd, right;
+    mrb_bool  sprint, jump;
+    mrb_get_args(mrb, "fffbb", &secs, &fwd, &right, &sprint, &jump);
+    require_player(mrb);
+    if (secs < 0 || secs > 600) mrb_raise(mrb, E_ARGUMENT_ERROR, "seconds must be within 0..600");
+    game::PlayerInput in;
+    in.forward = static_cast<float>(fwd);
+    in.right   = static_cast<float>(right);
+    in.yaw     = *g_host->yaw;
+    in.sprint  = sprint;
+    if (jump) game::queue_jump(*g_host->registry, *g_host->player);
+    // update_player caps a single call's catch-up, so feed it slices.
+    for (double left = secs; left > 0; left -= 0.1)
+        game::update_player(*g_host->registry, *g_host->player, in, *g_host->collision, *g_host->frame,
+                            g_host->map_h, std::min(left, 0.1));
+    return mrb_nil_value();
 }
 
 // -- Fog ---------------------------------------------------------------------
@@ -173,6 +271,20 @@ module Camera
   end
 end
 
+module Player
+  def self.simulate(seconds, forward: 0, right: 0, sprint: false, jump: false)
+    __simulate(seconds, forward, right, sprint, jump)
+    self
+  end
+
+  def self.inspect
+    x, y, alt = pos
+    vx, vy, vz = vel
+    format("#<Player x=%.2f y=%.2f alt=%.2f v=(%.2f, %.2f, %.2f) %s%s>",
+           x, y, alt, vx, vy, vz, grounded? ? "grounded" : "airborne", noclip ? " noclip" : "")
+  end
+end
+
 module Fog
   def self.inspect
     format("#<Fog density=%g opaque=%.0f clear=%.0f>", density, opaque, clear)
@@ -196,8 +308,11 @@ def help
   puts <<~TEXT
     Camera                      position/orientation; Camera.x .y .alt .yaw .pitch .speed (all settable)
     Camera.pos                  [x, y, alt] in map metres (x wraps at the circumference)
-    teleport(x, y, alt = cur)   move the camera
+    teleport(x, y, alt = cur)   move the camera (the player too, falling from there, unless noclip)
     look(yaw, pitch = cur)      orient the camera, degrees (yaw 0 = along +Y)
+    Player                      Player.pos .vel (map metres, feet), .grounded?, .noclip (settable; F key)
+    Player.drop(x, y)           put the player on the nearest street near (x, y)
+    Player.simulate(secs, forward: 1, right: 0, sprint: false, jump: false)   run physics now
     Fog                         haze; Fog.density .opaque .clear (settable), Fog.reset
     screenshot("file.png")      save the next frame (console included)
     clear                       clear this console      quit    exit the game
@@ -231,6 +346,14 @@ void install_bindings(Console& console, DebugHost& host)
     mrb_define_method(mrb, mrb->kernel_module, "screenshot", screenshot, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, mrb->kernel_module, "quit", quit, MRB_ARGS_NONE());
     mrb_define_method(mrb, mrb->kernel_module, "clear", clear, MRB_ARGS_NONE());
+
+    RClass* player = mrb_define_module(mrb, "Player");
+    mrb_define_module_function(mrb, player, "pos", player_pos, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, player, "vel", player_vel, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, player, "grounded?", player_grounded, MRB_ARGS_NONE());
+    define_accessor(mrb, player, "noclip", player_noclip, player_set_noclip);
+    mrb_define_module_function(mrb, player, "drop", player_drop, MRB_ARGS_REQ(2));
+    mrb_define_module_function(mrb, player, "__simulate", player_simulate, MRB_ARGS_REQ(5));
 
     console.eval_startup(k_ruby_helpers);
 }
