@@ -17,6 +17,16 @@ struct CameraPos
     double x = 0, y = 0, alt = 0;
 };
 
+// Haze: none inside `clear` metres, then exponential at `density` per metre,
+// rescaled to reach full opacity at `opaque`. The far side (~8 km overhead) is
+// lost in it entirely until the backdrop shell exists.
+struct FogParams
+{
+    float density = 3.0e-4f;
+    float opaque  = 7000.0f;
+    float clear   = 1500.0f;
+};
+
 struct WorldStats
 {
     uint32_t terrain_draws = 0;
@@ -38,6 +48,9 @@ public:
     void submit(bgfx::ViewId view, const CameraPos& cam, bool reversed_z) const;
 
     const WorldStats& stats() const { return m_stats; }
+
+    // Read every submit, so it can be tuned live (the debug console does).
+    FogParams fog;
 
 private:
     struct Group

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <vector>
 
 #include <bgfx/bgfx.h>
 #include <bimg/bimg.h>
@@ -12,6 +13,8 @@
 #include <SDL3/SDL.h>
 #include <entt/entt.hpp>
 
+#include "debug/bindings.h"
+#include "debug/console.h"
 #include "render/world_renderer.h"
 #include "world/world_loader.h"
 #include "world/wrap.h"
@@ -48,9 +51,14 @@ static constexpr float k_mouse_sens = 0.002f;          // radians per pixel
 static constexpr float k_pitch_max  = bx::kPiHalf;
 
 static constexpr double k_start_altitude = 200.0;      // metres off the wall
-static constexpr double k_fly_speed      = 40.0;       // m/s; Shift ×10
+static double           g_fly_speed       = 40.0;      // m/s; Shift ×10, console-settable
 static double           g_cylinder_radius = 0.0;       // from the manifest
 static double           g_map_h           = 0.0;
+
+// Drop-down Ruby console (Shift+`) and the game state its commands can reach.
+static debug::Console   g_console;
+static debug::DebugHost g_debug_host;
+static std::vector<const char*> g_console_lines;   // --console, run once the world loads
 
 // --shot: render one frame of the world to a PNG and exit (for headless checks).
 static const char* g_shot_path = nullptr;
@@ -123,6 +131,8 @@ static bool load_scene()
     const world::Manifest& m = world->manifest;
     g_cylinder_radius = m.radius;
     g_map_h           = m.map_h;
+    g_debug_host.radius = m.radius;
+    g_debug_host.map_h  = m.map_h;
     if (!g_cam_from_args) {
         g_cam.x   = 0.5 * m.map_w;
         g_cam.y   = 0.5 * m.map_h;
@@ -169,7 +179,7 @@ static void update_camera(double dt)
 
     const double len = std::sqrt(double(mx) * mx + double(my) * my + double(mz) * mz);
     if (len < 1e-6) return;
-    const double speed = k_fly_speed * (keys[SDL_SCANCODE_LSHIFT] ? 10.0 : 1.0) * dt / len;
+    const double speed = g_fly_speed * (keys[SDL_SCANCODE_LSHIFT] ? 10.0 : 1.0) * dt / len;
 
     const double R = g_cylinder_radius;
     g_cam.x   = world::wrap_x(g_cam.x + mx * speed * R / (R - g_cam.alt));
@@ -234,6 +244,7 @@ static void free_scene()
 //   --shot <file.png>         render the world once, save a screenshot, exit
 //   --pos <x> <y> <alt>       start position in map metres
 //   --view <yaw> <pitch>      start orientation in degrees
+//   --console <ruby>          open the console and run a line (repeatable)
 static bool parse_args(int argc, char* argv[])
 {
     for (int i = 1; i < argc; ++i) {
@@ -249,8 +260,11 @@ static bool parse_args(int argc, char* argv[])
             g_cam_yaw   = bx::toRad(static_cast<float>(atof(argv[++i])));
             g_cam_pitch = bx::clamp(bx::toRad(static_cast<float>(atof(argv[++i]))),
                                     -k_pitch_max, k_pitch_max);
+        } else if (!strcmp(a, "--console") && i + 1 < argc) {
+            g_console_lines.push_back(argv[++i]);
         } else {
-            fprintf(stderr, "usage: %s [--shot file.png] [--pos x y alt] [--view yaw pitch]\n",
+            fprintf(stderr, "usage: %s [--shot file.png] [--pos x y alt] [--view yaw pitch] "
+                            "[--console ruby]...\n",
                     argv[0]);
             return false;
         }
@@ -331,6 +345,13 @@ int main(int argc, char* argv[])
     // Enable the debug-text overlay (used for Title and Menu screens).
     bgfx::setDebug(BGFX_DEBUG_TEXT);
 
+    bool running = true;
+    if (g_console.create()) {
+        g_debug_host = {&g_cam, &g_cam_yaw, &g_cam_pitch, k_pitch_max, &g_fly_speed,
+                        g_cylinder_radius, g_map_h, &g_world, &running};
+        debug::install_bindings(g_console, g_debug_host);
+    }
+
     // ---------------------------------------------------------------
     // ECS registry (populated in later steps)
     // ---------------------------------------------------------------
@@ -350,7 +371,6 @@ int main(int argc, char* argv[])
     // ---------------------------------------------------------------
     // Game loop
     // ---------------------------------------------------------------
-    bool     running    = true;
     uint64_t last_ticks = SDL_GetTicksNS();
     int      shot_frame = 0;   // world frames rendered in --shot mode
     while (running) {
@@ -364,6 +384,10 @@ int main(int argc, char* argv[])
             if (ev.type == SDL_EVENT_QUIT) {
                 running = false;
             }
+            // The console sees input first: its toggle works on every screen, and
+            // while it is open nothing reaches the game.
+            if (g_console.handle_event(ev, window))
+                continue;
             if (ev.type == SDL_EVENT_KEY_DOWN) {
                 const SDL_Scancode sc = ev.key.scancode;
                 switch (screen) {
@@ -457,6 +481,9 @@ int main(int argc, char* argv[])
                     if (++g_load_wait > 2) {
                         g_scene_loaded = load_scene();
                         g_load_failed  = !g_scene_loaded;
+                        // After the load, so commands see the manifest's map bounds.
+                        for (const char* line : g_console_lines)
+                            g_console.run_line(line, window);
                         last_ticks     = SDL_GetTicksNS();   // don't fly off on the long frame
                     }
                 } else if (g_load_failed) {
@@ -466,7 +493,7 @@ int main(int argc, char* argv[])
                 }
 
                 if (g_scene_loaded) {
-                    if (!g_shot_path) update_camera(dt);
+                    if (!g_shot_path && !g_console.is_open()) update_camera(dt);
                     render_scene();
 
                     const bgfx::Stats* st = bgfx::getStats();
@@ -494,6 +521,9 @@ int main(int argc, char* argv[])
                 break;
         }
 
+        // View 1: drawn after the scene, so the console backdrop covers it.
+        g_console.draw(1, static_cast<uint16_t>(k_width), static_cast<uint16_t>(k_height), k_cols, k_rows);
+
         bgfx::frame();
     }
 
@@ -501,6 +531,7 @@ int main(int argc, char* argv[])
     // Shutdown
     // ---------------------------------------------------------------
     free_scene();
+    g_console.destroy();
     bgfx::shutdown();
     SDL_DestroyWindow(window);
     SDL_Quit();

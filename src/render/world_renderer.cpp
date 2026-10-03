@@ -17,12 +17,6 @@ constexpr double   k_column_radius   = 30.0;
 constexpr int      k_column_segments = 64;
 constexpr uint8_t  k_column_rgb[3]   = {255, 246, 222};
 
-// Haze: none for the first 1.5 km, then exponential, rescaled to reach full
-// opacity at 7 km. The far side (~8 km overhead) is lost in it entirely.
-constexpr float k_fog_density = 3.0e-4f;
-constexpr float k_fog_opaque  = 7000.0f;
-constexpr float k_fog_clear   = 1500.0f;
-
 bgfx::VertexLayout terrain_layout()
 {
     bgfx::VertexLayout l;
@@ -175,7 +169,7 @@ void WorldRenderer::submit(bgfx::ViewId view, const CameraPos& cam_in, bool reve
                          | (reversed_z ? BGFX_STATE_DEPTH_TEST_GREATER : BGFX_STATE_DEPTH_TEST_LESS);
 
     const float cylinder[4] = {static_cast<float>(m_radius), static_cast<float>(cam.alt), 0, 0};
-    const float fog[4]      = {k_fog_density, k_fog_opaque, k_fog_clear, 0};
+    const float fog_u[4]    = {fog.density, fog.opaque, fog.clear, 0};
     const float fog_color[4] = {((k_fog_rgba >> 24) & 0xff) / 255.0f, ((k_fog_rgba >> 16) & 0xff) / 255.0f,
                                 ((k_fog_rgba >> 8) & 0xff) / 255.0f, 1.0f};
     const float lit[4]      = {0, 0, 0, 0};
@@ -186,7 +180,7 @@ void WorldRenderer::submit(bgfx::ViewId view, const CameraPos& cam_in, bool reve
         const float offset[4] = {static_cast<float>(world::wrap_dx(g.centre_x - cam.x)),
                                  static_cast<float>(g.centre_y - cam.y), 0, 0};
         bgfx::setUniform(u_cylinder, cylinder);
-        bgfx::setUniform(u_fog, fog);
+        bgfx::setUniform(u_fog, fog_u);
         bgfx::setUniform(u_fog_color, fog_color);
         bgfx::setUniform(u_material, lit);
         bgfx::setUniform(u_offset, offset);
@@ -201,7 +195,7 @@ void WorldRenderer::submit(bgfx::ViewId view, const CameraPos& cam_in, bool reve
         const float offset[4] = {static_cast<float>(world::wrap_dx(-cam.x)),
                                  static_cast<float>(-cam.y), 0, 0};
         bgfx::setUniform(u_cylinder, cylinder);
-        bgfx::setUniform(u_fog, fog);
+        bgfx::setUniform(u_fog, fog_u);
         bgfx::setUniform(u_fog_color, fog_color);
         bgfx::setUniform(u_material, emissive);
         bgfx::setUniform(u_offset, offset);
@@ -223,7 +217,7 @@ void WorldRenderer::submit(bgfx::ViewId view, const CameraPos& cam_in, bool reve
     for (const BuildingType& t : m_types) {
         if (!t.count) continue;
         bgfx::setUniform(u_cylinder, cylinder);
-        bgfx::setUniform(u_fog, fog);
+        bgfx::setUniform(u_fog, fog_u);
         bgfx::setUniform(u_fog_color, fog_color);
         bgfx::setUniform(u_material, lit);
         bgfx::setUniform(u_cam_chunk, cam_chunk);

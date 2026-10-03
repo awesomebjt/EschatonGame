@@ -80,6 +80,46 @@ include(${bgfx_cmake_SOURCE_DIR}/cmake/bgfxToolUtils.cmake)
 set(BGFX_SHADER_INCLUDE_PATH "${bgfx_cmake_SOURCE_DIR}/bgfx/src"
     CACHE STRING "bgfx shader include directory" FORCE)
 
+# --- mruby (embedded Ruby for the debug console) ----------------------------
+# mruby builds with its own rake toolchain, not CMake, so fetch the source only
+# and drive rake from a custom command. Requires ruby and rake on the host.
+# mruby has no CMakeLists.txt, so MakeAvailable only downloads it.
+FetchContent_Declare(
+    mruby
+    GIT_REPOSITORY https://github.com/mruby/mruby.git
+    GIT_TAG        3.4.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(mruby)
+
+find_program(RAKE_EXECUTABLE rake REQUIRED)
+set(MRUBY_CONFIG    ${CMAKE_SOURCE_DIR}/cmake/mruby_config.rb)
+set(MRUBY_BUILD_DIR ${CMAKE_BINARY_DIR}/mruby)
+set(MRUBY_LIB       ${MRUBY_BUILD_DIR}/host/lib/libmruby.a)
+
+add_custom_command(
+    OUTPUT  ${MRUBY_LIB}
+    COMMAND ${CMAKE_COMMAND} -E env
+            MRUBY_CONFIG=${MRUBY_CONFIG}
+            MRUBY_BUILD_DIR=${MRUBY_BUILD_DIR}
+            ${RAKE_EXECUTABLE} -f ${mruby_SOURCE_DIR}/Rakefile all
+    WORKING_DIRECTORY ${mruby_SOURCE_DIR}
+    DEPENDS ${MRUBY_CONFIG}
+    COMMENT "Building mruby"
+    VERBATIM
+)
+add_custom_target(mruby_build DEPENDS ${MRUBY_LIB})
+
+# The presym headers mruby generates live in the build tree, not the source.
+file(MAKE_DIRECTORY ${MRUBY_BUILD_DIR}/host/include)
+add_library(mruby STATIC IMPORTED)
+set_target_properties(mruby PROPERTIES
+    IMPORTED_LOCATION             ${MRUBY_LIB}
+    INTERFACE_INCLUDE_DIRECTORIES "${mruby_SOURCE_DIR}/include;${MRUBY_BUILD_DIR}/host/include"
+    INTERFACE_LINK_LIBRARIES      $<$<NOT:$<PLATFORM_ID:Windows>>:m>
+)
+add_dependencies(mruby mruby_build)
+
 # ---------------------------------------------------------------------------
 # Shader compilation
 # ---------------------------------------------------------------------------
@@ -90,6 +130,7 @@ bgfx_compile_shaders(
     TYPE        VERTEX
     SHADERS     ${SHADER_SRC_DIR}/vs_terrain.sc
                 ${SHADER_SRC_DIR}/vs_building.sc
+                ${SHADER_SRC_DIR}/vs_overlay.sc
     VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
     INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
@@ -99,6 +140,7 @@ bgfx_compile_shaders(
 bgfx_compile_shaders(
     TYPE        FRAGMENT
     SHADERS     ${SHADER_SRC_DIR}/fs_world.sc
+                ${SHADER_SRC_DIR}/fs_overlay.sc
     VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
     INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
@@ -119,6 +161,8 @@ add_custom_target(compile_shaders ALL DEPENDS ${VS_OUTPUT_FILES} ${FS_OUTPUT_FIL
 add_executable(eschaton
     src/main.cpp
     src/core/json.cpp
+    src/debug/bindings.cpp
+    src/debug/console.cpp
     src/render/shader.cpp
     src/render/world_renderer.cpp
     src/world/formats.cpp
@@ -151,6 +195,7 @@ target_link_libraries(eschaton PRIVATE
     bgfx
     bx
     bimg
+    mruby
 )
 
 target_include_directories(eschaton PRIVATE
