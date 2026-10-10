@@ -222,6 +222,43 @@ mrb_value fog_set_clear(mrb_state* mrb, mrb_value)
     return mrb_float_value(mrb, v);
 }
 
+mrb_value fog_color(mrb_state* mrb, mrb_value)
+{
+    char hex[8];
+    std::snprintf(hex, sizeof hex, "#%06x", unsigned(g_host->world->fog.rgba >> 8));
+    return mrb_str_new_cstr(mrb, hex);
+}
+
+// Takes "#rgb", "#rrggbb" (the # optional) or an Integer 0xRRGGBB.
+mrb_value fog_set_color(mrb_state* mrb, mrb_value)
+{
+    mrb_value v;
+    mrb_get_args(mrb, "o", &v);
+    uint32_t rgb = 0;
+    if (mrb_integer_p(v)) {
+        const mrb_int n = mrb_integer(v);
+        if (n < 0 || n > 0xffffff) mrb_raise(mrb, E_ARGUMENT_ERROR, "colour must be within 0..0xFFFFFF");
+        rgb = uint32_t(n);
+    } else if (mrb_string_p(v)) {
+        const char* p   = RSTRING_PTR(v);
+        mrb_int     len = RSTRING_LEN(v);
+        if (len > 0 && p[0] == '#') ++p, --len;
+        if (len != 3 && len != 6) mrb_raise(mrb, E_ARGUMENT_ERROR, "expected \"#rgb\" or \"#rrggbb\"");
+        for (mrb_int i = 0; i < len; ++i) {
+            const char c = p[i];
+            const int  d = c >= '0' && c <= '9' ? c - '0'
+                         : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                         : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+            if (d < 0) mrb_raise(mrb, E_ARGUMENT_ERROR, "not a hex colour");
+            rgb = len == 3 ? (rgb << 8) | uint32_t(d * 17) : (rgb << 4) | uint32_t(d);
+        }
+    } else {
+        mrb_raise(mrb, E_TYPE_ERROR, "expected a hex String or an Integer");
+    }
+    g_host->world->fog.rgba = (rgb << 8) | 0xff;
+    return v;
+}
+
 mrb_value fog_reset(mrb_state*, mrb_value)
 {
     g_host->world->fog = render::FogParams{};
@@ -380,7 +417,7 @@ end
 
 module Fog
   def self.inspect
-    format("#<Fog density=%g opaque=%.0f clear=%.0f>", density, opaque, clear)
+    format("#<Fog density=%g opaque=%.0f clear=%.0f color=%s>", density, opaque, clear, color)
   end
 end
 
@@ -406,7 +443,8 @@ def help
     Player                      Player.pos .vel (map metres, feet), .grounded?, .noclip (settable; F key)
     Player.drop(x, y)           put the player on the nearest street near (x, y)
     Player.simulate(secs, forward: 1, right: 0, sprint: false, jump: false)   run physics now
-    Fog                         haze; Fog.density .opaque .clear (settable), Fog.reset
+    Fog                         haze; Fog.density .opaque .clear .color (settable), Fog.reset
+    Fog.color = "#c8a0ff"       haze colour as hex ("#rgb", "#rrggbb" or 0xRRGGBB); also the sky
     Clouds                      .coverage .alt .lean .seed (regenerate), .shadow .enabled, .set_wind(x, y)
     screenshot("file.png")      save the next frame (console included)
     clear                       clear this console      quit    exit the game
@@ -435,6 +473,7 @@ void install_bindings(Console& console, DebugHost& host)
     define_accessor(mrb, fog, "density", fog_density, fog_set_density);
     define_accessor(mrb, fog, "opaque", fog_opaque, fog_set_opaque);
     define_accessor(mrb, fog, "clear", fog_clear, fog_set_clear);
+    define_accessor(mrb, fog, "color", fog_color, fog_set_color);
     mrb_define_module_function(mrb, fog, "reset", fog_reset, MRB_ARGS_NONE());
 
     mrb_define_method(mrb, mrb->kernel_module, "screenshot", screenshot, MRB_ARGS_REQ(1));

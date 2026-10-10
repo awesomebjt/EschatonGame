@@ -138,8 +138,8 @@ void CloudRenderer::submit(bgfx::ViewId view, const CameraPos& cam, bool reverse
 
     const float cylinder[4]  = {static_cast<float>(R), static_cast<float>(cam.alt), 0, 0};
     const float fog_u[4]     = {fog.density, fog.opaque, fog.clear, 0};
-    const float fog_color[4] = {((k_fog_rgba >> 24) & 0xff) / 255.0f, ((k_fog_rgba >> 16) & 0xff) / 255.0f,
-                                ((k_fog_rgba >> 8) & 0xff) / 255.0f, 1.0f};
+    float fog_color[4];
+    fog.color(fog_color);
     bgfx::setUniform(u_cylinder, cylinder);
     bgfx::setUniform(u_fog, fog_u);
     bgfx::setUniform(u_fog_color, fog_color);

@@ -294,7 +294,7 @@ static void render_scene()
     else
         bx::mtxProj(proj, 70.0f, aspect, k_near_gl, 40000.0f, true);
 
-    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, render::k_fog_rgba,
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, g_world.fog.rgba,
                        reversed_z ? 0.0f : 1.0f, 0);
     // setViewTransform is per-view and persists for all draws to view 0 this frame.
     bgfx::setViewTransform(0, view, proj);

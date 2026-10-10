@@ -21,11 +21,24 @@ struct CameraPos
 // Haze: none inside `clear` metres, then exponential at `density` per metre,
 // rescaled to reach full opacity at `opaque`. The far side (~8 km overhead) is
 // lost in it entirely until the backdrop shell exists.
+// Default haze colour; also the clear colour, so unlit space reads as distant air.
+inline constexpr uint32_t k_fog_rgba = 0xB4C3D2ff;
+
 struct FogParams
 {
-    float density = 3.0e-4f;
-    float opaque  = 7000.0f;
-    float clear   = 1500.0f;
+    float    density = 3.0e-4f;
+    float    opaque  = 7000.0f;
+    float    clear   = 1500.0f;
+    uint32_t rgba    = k_fog_rgba;  // 0xRRGGBBAA, as bgfx::setViewClear takes it
+
+    // The colour as the u_fogColor uniform wants it.
+    void color(float out[4]) const
+    {
+        out[0] = ((rgba >> 24) & 0xff) / 255.0f;
+        out[1] = ((rgba >> 16) & 0xff) / 255.0f;
+        out[2] = ((rgba >> 8) & 0xff) / 255.0f;
+        out[3] = 1.0f;
+    }
 };
 
 // Cloud shadow map over the whole floor (u = x / map_w, v = y / map_h, both
@@ -147,7 +160,5 @@ private:
     WorldStats m_stats;
 };
 
-// Haze colour; also the clear colour, so unlit space reads as distant air.
-inline constexpr uint32_t k_fog_rgba = 0xB4C3D2ff;
 
 } // namespace render

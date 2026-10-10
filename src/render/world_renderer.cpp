@@ -296,8 +296,8 @@ void WorldRenderer::submit(bgfx::ViewId view, const CameraPos& cam_in, bool reve
 
     const float cylinder[4] = {static_cast<float>(m_radius), static_cast<float>(cam.alt), 0, 0};
     const float fog_u[4]    = {fog.density, fog.opaque, fog.clear, 0};
-    const float fog_color[4] = {((k_fog_rgba >> 24) & 0xff) / 255.0f, ((k_fog_rgba >> 16) & 0xff) / 255.0f,
-                                ((k_fog_rgba >> 8) & 0xff) / 255.0f, 1.0f};
+    float fog_color[4];
+    fog.color(fog_color);
     // Shadow uv at the camera, taken modulo 1 in double so the per-vertex offset
     // added in the shader stays small.
     const bool  has_shadow = bgfx::isValid(cloud_shadow.texture) && cloud_shadow.strength > 0;
