@@ -14,8 +14,14 @@ tricks, tuning constants that deviate from the reference formulas and why.
 - **Collision is flat map space, not the cylinder.** `CollisionWorld` keeps the
   exporter's terrain triangles (chunk-relative floats) and building instances, bucketed
   into a ~32 m grid that wraps in x. Queries return triangles relative to a double-
-  precision origin, so all contact maths is small floats. Buildings use their LOD0
-  prototype mesh (passages stay open), not footprint boxes.
+  precision origin, so all contact maths is small floats. Buildings use their type's
+  collision shell from `prototypes_collision.bin`, not footprint boxes and never the
+  render mesh (15–23k triangles). The shell is closed 12 cm slabs with the ground-floor
+  doors, carriage passage and colonnade left open, so ground floors are walkable. Thin
+  walls are safe because moves are sub-stepped at half the capsule radius. Courtyard
+  types are up to ~560 triangles, so `gather` rejects each triangle against the query
+  box in building-local space (precomputed xy bounds) before rotating it into place;
+  step cost went 84 → 164 µs with the door shells.
 - **Character controller is kinematic, not a rigid body** (`character.cpp`): velocity
   from input + pseudoforces, then move-and-slide in three passes — lift by
   `step_height`, horizontal in half-radius sub-steps, then down with a ground snap.

@@ -46,13 +46,22 @@ bool CollisionWorld::build(const world::WorldData& w)
     }
 
     m_proto.assign(w.prototypes.size(), {});
+    m_proto_box.assign(w.prototypes.size(), {});
     std::vector<float> proto_reach(w.prototypes.size(), 0.0f);
     for (size_t t = 0; t < w.prototypes.size(); ++t) {
-        const world::PrototypeMesh& p = w.prototypes[t];
+        const world::PrototypeMesh& p = w.prototypes[t].collision;
         for (uint32_t index : p.indices) {
             const float* pos = p.vertices[index].pos;
             m_proto[t].insert(m_proto[t].end(), pos, pos + 3);
             proto_reach[t] = std::max(proto_reach[t], std::hypot(pos[0], pos[1]));
+        }
+        const std::vector<float>& tris = m_proto[t];
+        for (size_t k = 0; k + 9 <= tris.size(); k += 9) {
+            m_proto_box[t].insert(m_proto_box[t].end(),
+                                  {std::min({tris[k], tris[k + 3], tris[k + 6]}),
+                                   std::min({tris[k + 1], tris[k + 4], tris[k + 7]}),
+                                   std::max({tris[k], tris[k + 3], tris[k + 6]}),
+                                   std::max({tris[k + 1], tris[k + 4], tris[k + 7]})});
         }
     }
 
@@ -177,12 +186,21 @@ void CollisionWorld::gather(double ox, double oy, double oz, float half, std::ve
             out.push_back(t);
             return;
         }
-        const Building&           bd = m_buildings[id];
-        const std::vector<float>& p  = m_proto[bd.type];
+        const Building&           bd  = m_buildings[id];
+        const std::vector<float>& p   = m_proto[bd.type];
+        const std::vector<float>& box = m_proto_box[bd.type];
         const float dx = static_cast<float>(world::wrap_dx((bd.chunk_col + 0.5) * m_chunk_x + bd.x - ox));
         const float dy = static_cast<float>((bd.chunk_row + 0.5) * m_chunk_y + bd.y - oy);
         const float dz = static_cast<float>(bd.z - oz);
-        for (size_t k = 0; k + 9 <= p.size(); k += 9) {
+        // The query box in the building's own axes: its centre rotated back, and the
+        // half-width grown to cover the rotated square. Most of a courtyard building's
+        // hundreds of triangles are rejected here without being transformed.
+        const float qx = bd.cos_r * -dx + bd.sin_r * -dy;
+        const float qy = -bd.sin_r * -dx + bd.cos_r * -dy;
+        const float qh = half * (std::fabs(bd.cos_r) + std::fabs(bd.sin_r));
+        for (size_t k = 0, b = 0; k + 9 <= p.size(); k += 9, b += 4) {
+            if (box[b] > qx + qh || box[b + 2] < qx - qh || box[b + 1] > qy + qh || box[b + 3] < qy - qh)
+                continue;
             Tri t;
             float* dst[3] = {t.a, t.b, t.c};
             for (int v = 0; v < 3; ++v) {

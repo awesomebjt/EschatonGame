@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -37,12 +38,22 @@ struct CollisionChunk
     std::vector<float> triangles;   // 9 floats per triangle, relative to the chunk centre
 };
 
+// One building type's meshes. Exterior exists at every LOD; glazing and door
+// glazing only in bands with openings; interior at LOD0 only. The collision slot
+// of each LOD stays empty; collision has its own member.
+struct BuildingPrototype
+{
+    std::vector<std::array<PrototypeMesh, k_part_count>> lods;   // [lod][part]
+    PrototypeMesh                                            collision;
+};
+
 struct WorldData
 {
     Manifest                                   manifest;
+    PrototypeIndex                             proto_index;
     std::vector<TerrainGroup>                  groups;
     std::vector<std::vector<BuildingInstance>> buildings;    // indexed by building type
-    std::vector<PrototypeMesh>                 prototypes;   // LOD0, indexed by building type
+    std::vector<BuildingPrototype>             prototypes;   // indexed by building type
     std::vector<CollisionChunk>                collision;    // one per manifest chunk, same order
     size_t                                     monument_count = 0;
 };

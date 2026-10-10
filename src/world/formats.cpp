@@ -100,6 +100,14 @@ std::optional<Manifest> load_manifest(const std::string& path)
         m.building_types.push_back(std::move(t));
     }
 
+    // Material 7 is the generator's MAT_BUILDING; the prototypes carry no colour.
+    const json::Value& rgb = (*doc)["materials"]["7"];
+    if (rgb.size() != 3) {
+        std::fprintf(stderr, "world: manifest has no building material\n");
+        return std::nullopt;
+    }
+    for (size_t k = 0; k < 3; ++k) m.building_rgb[k] = static_cast<float>(rgb[k].as_double());
+
     const json::Value& chunks = (*doc)["chunks"];
     m.chunks.reserve(chunks.size());
     for (size_t k = 0; k < chunks.size(); ++k) {
@@ -143,6 +151,47 @@ std::optional<ChunkData> load_chunk(const std::string& path)
     return c;
 }
 
+std::optional<PrototypeIndex> load_prototype_index(const std::string& path)
+{
+    const auto bytes = read_file(path);
+    if (!bytes) return std::nullopt;
+
+    const auto doc = json::parse({reinterpret_cast<const char*>(bytes->data()), bytes->size()});
+    if (!doc || (*doc)["version"].as_int() != 2
+        || (*doc)["vertex_stride"].as_int() != static_cast<int>(sizeof(BuildVertex))) {
+        std::fprintf(stderr, "world: %s is not a version-2 prototype index\n", path.c_str());
+        return std::nullopt;
+    }
+
+    PrototypeIndex x;
+    const json::Value& bands = (*doc)["lod_bands"];
+    for (size_t k = 0; k < bands.size(); ++k) {
+        if (bands[k]["lod"].as_int(-1) != static_cast<int>(k)) {
+            std::fprintf(stderr, "world: %s lists LOD bands out of order\n", path.c_str());
+            return std::nullopt;
+        }
+        x.lod_bands.push_back({static_cast<float>(bands[k]["max_distance"].as_double()),
+                               bands[k]["openings"].as_bool()});
+    }
+    x.interior_max_distance = static_cast<float>((*doc)["interior_max_distance"].as_double());
+    const json::Value& tile = (*doc)["facade_tile"];
+    x.bay         = static_cast<float>(tile["size"].as_double());
+    x.window_w    = static_cast<float>(tile["window"]["width"].as_double());
+    x.window_h    = static_cast<float>(tile["window"]["height"].as_double());
+    x.window_sill = static_cast<float>(tile["window"]["sill"].as_double());
+    x.recess      = static_cast<float>(tile["recess"].as_double());
+    const json::Value& files = (*doc)["files"];
+    x.shell_file     = files["shell"].as_string();
+    x.interior_file  = files["interior"].as_string();
+    x.collision_file = files["collision"].as_string();
+    if (x.lod_bands.empty() || x.bay <= 0 || x.window_w <= 0 || x.window_h <= 0
+        || x.shell_file.empty() || x.interior_file.empty() || x.collision_file.empty()) {
+        std::fprintf(stderr, "world: %s is incomplete\n", path.c_str());
+        return std::nullopt;
+    }
+    return x;
+}
+
 std::optional<std::vector<PrototypeMesh>> load_prototypes(const std::string& path)
 {
     const auto bytes = read_file(path);
@@ -151,19 +200,27 @@ std::optional<std::vector<PrototypeMesh>> load_prototypes(const std::string& pat
     Reader   r{*bytes};
     char     magic[4];
     uint32_t version = 0, count = 0;
-    if (!r.read(magic) || std::memcmp(magic, "PROT", 4) != 0 || !r.read(version) || version != 1
+    if (!r.read(magic) || std::memcmp(magic, "PROT", 4) != 0 || !r.read(version) || version != 2
         || !r.read(count)) {
-        std::fprintf(stderr, "world: %s is not a version-1 prototype file\n", path.c_str());
+        std::fprintf(stderr, "world: %s is not a version-2 prototype file\n", path.c_str());
         return std::nullopt;
     }
 
+    // The 14-byte mesh header leaves everything after it unaligned; Reader copies
+    // field by field, so that is fine.
     std::vector<PrototypeMesh> meshes(count);
     for (PrototypeMesh& m : meshes) {
         uint32_t nv = 0, ni = 0;
-        if (!r.read(m.type) || !r.read(m.lod) || !r.read(nv) || !r.read(ni)
+        if (!r.read(m.type) || !r.read(m.lod) || !r.read(m.part) || !r.read(nv) || !r.read(ni)
             || !r.read_array(m.vertices, nv) || !r.read_array(m.indices, ni)) {
             std::fprintf(stderr, "world: %s is truncated\n", path.c_str());
             return std::nullopt;
+        }
+        for (const uint32_t idx : m.indices) {
+            if (idx >= nv) {
+                std::fprintf(stderr, "world: %s has an out-of-range index\n", path.c_str());
+                return std::nullopt;
+            }
         }
     }
     return meshes;

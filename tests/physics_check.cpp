@@ -142,7 +142,7 @@ int main()
         // Prototype extents per type, for the depth of the courtyard.
         std::vector<float> depth(w->prototypes.size(), 0);
         for (size_t t = 0; t < w->prototypes.size(); ++t)
-            for (const auto& v : w->prototypes[t].vertices) depth[t] = std::max(depth[t], v.pos[1]);
+            for (const auto& v : w->prototypes[t].collision.vertices) depth[t] = std::max(depth[t], v.pos[1]);
 
         auto pick = [&](bool courtyard) -> std::pair<size_t, const world::BuildingInstance*> {
             for (size_t t = 0; t < w->buildings.size(); ++t)
@@ -151,7 +151,25 @@ int main()
             return {0, nullptr};
         };
 
-        // Facing a solid building's front from 3 m out, walk into it for 3 s.
+        // Facing a solid building's front from 3 m out, walk into it for 3 s. Aim at
+        // the first window bay (2.5 m off centre): windows are glazed, so solid, while
+        // the centre of the street wall is the door.
+        if (auto [type, b] = pick(false); b) {
+            Sim sim(cw, m);
+            double x, y;
+            building_to_map(m, *b, 2.5, -3, x, y);
+            sim.place(x, y, 0.1);
+            sim.run(0.5);
+            sim.run(3.0, 1.0f, 0, -b->rot);
+            const auto v = sim.view();
+            double lx, ly;
+            map_to_building(m, *b, v.x, v.y, lx, ly);
+            std::snprintf(buf, sizeof buf, "%s: stopped at local y %.2f (wall at 0), penetration %.3f",
+                          m.building_types[type].name.c_str(), ly, sim.worst_penetration);
+            check(ly < -0.25 && ly > -0.5 && sim.worst_penetration < 0.03f, "wall stops the capsule", buf);
+        }
+
+        // The street door (1.6 m wide at x = 0): walk in and keep going for 3 s.
         if (auto [type, b] = pick(false); b) {
             Sim sim(cw, m);
             double x, y;
@@ -162,9 +180,11 @@ int main()
             const auto v = sim.view();
             double lx, ly;
             map_to_building(m, *b, v.x, v.y, lx, ly);
-            std::snprintf(buf, sizeof buf, "%s: stopped at local y %.2f (wall at 0), penetration %.3f",
-                          m.building_types[type].name.c_str(), ly, sim.worst_penetration);
-            check(ly < -0.25 && ly > -0.5 && sim.worst_penetration < 0.03f, "wall stops the capsule", buf);
+            std::snprintf(buf, sizeof buf, "%s: reached local y %.1f (depth %.0f), penetration %.3f",
+                          m.building_types[type].name.c_str(), ly, depth[type],
+                          sim.worst_penetration);
+            check(ly > 2 && ly < depth[type] && sim.worst_penetration < 0.03f,
+                  "walks in through a door", buf);
         }
 
         // Same toward a courtyard building's passage (2 m wide at x = 0).

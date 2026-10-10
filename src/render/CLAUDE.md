@@ -21,7 +21,24 @@ lifetime/threading rules.
   272k instances**: the instance carries chunk-relative position + chunk (col, row), and
   the shader rebuilds a camera-relative origin from whole-chunk steps, so no absolute
   25 km coordinate is ever held in float. This replaces the per-chunk band budget in the
-  root file for now; no frustum culling, no LOD (prototypes are 10–46 tris, all LOD0).
+  root file for now; no frustum culling.
+- **Building LOD: far draw plus near ring.** The far draw above uses LOD3 (~20 tris)
+  from static instance buffers, and `vs_building` collapses any instance within
+  `u_ring` chunks of the camera (7 × 7, from the LOD2 band edge + 10%). The CPU walks
+  those chunks every frame, picks each instance's LOD from squared distance with ±10%
+  hysteresis (state per instance), buckets by (type, LOD) into transient instance
+  buffers, and draws exterior, glazing (bands with openings) and interior (< 150 m,
+  no culling). Door panes are a separate part bucketed by the complement: drawn only
+  where the interior isn't, so near doors are open doorways the player can walk
+  through, and far ones aren't holes into an empty shell. The CPU and shader agree on the ring by chunk index, so nothing is
+  drawn twice or dropped. ~20 far + up to ~140 near draws.
+- **`fs_building` facade modes** (`u_material.y`): masonry (brick, faded out before
+  it shimmers), parallax and flat windows on LOD2/3 walls (the arch SDF on the bay
+  grid; parallax tests the opening again at the recess depth to show the reveal),
+  glazing (each bay ray-cast as a 5 × 4.5 × 6 m room, seeded per window and building,
+  with Fresnel toward the haze), interior (plain plaster). Lighting is shared with
+  `fs_world` through `shaders/lighting.sh`. Building colour is the manifest's
+  material 7, not baked into vertices.
 - **Buildings are rigid** (tangent plane at their origin, per root CLAUDE.md); the base
   ring is sunk by x² / 2R + 0.1 m so wide footprints meet the curving floor.
 - **Reversed-Z, infinite far, D32F** on [0, 1]-depth backends. Terrain layers sit 5 cm

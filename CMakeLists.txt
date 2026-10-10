@@ -143,6 +143,7 @@ bgfx_compile_shaders(
     SHADERS     ${SHADER_SRC_DIR}/fs_world.sc
                 ${SHADER_SRC_DIR}/fs_overlay.sc
                 ${SHADER_SRC_DIR}/fs_cloud.sc
+                ${SHADER_SRC_DIR}/fs_building.sc
     VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
     INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
@@ -155,7 +156,7 @@ foreach(out ${VS_OUTPUT_FILES})
     add_custom_command(OUTPUT ${out} APPEND DEPENDS ${SHADER_SRC_DIR}/cylinder.sh)
 endforeach()
 foreach(out ${FS_OUTPUT_FILES})
-    add_custom_command(OUTPUT ${out} APPEND DEPENDS ${SHADER_SRC_DIR}/fog.sh)
+    add_custom_command(OUTPUT ${out} APPEND DEPENDS ${SHADER_SRC_DIR}/fog.sh ${SHADER_SRC_DIR}/lighting.sh)
 endforeach()
 
 add_custom_target(compile_shaders ALL DEPENDS ${VS_OUTPUT_FILES} ${FS_OUTPUT_FILES})

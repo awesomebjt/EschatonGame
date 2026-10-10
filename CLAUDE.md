@@ -158,7 +158,7 @@ Rim speed = ωr ≈ 198 m/s
 The exporter emits no collision meshes; `src/physics/collision_world.*` derives them at load, in **flat map space** (the rendered curvature moves a wall the player can touch by about a millimetre):
 
 - **Terrain** — the exporter's own triangles, before the render-side curvature cuts. They already include roads, roundabout platforms (1.5 m), bridge decks (ramping to 6 m over 80 m) and the baked monuments.
-- **Buildings** — each instance tested against its type's LOD0 prototype mesh rather than a footprint box, so courtyards and their 2 m × 3 m passages stay walkable.
+- **Buildings** — each instance tested against its type's collision shell (`prototypes_collision.bin`, 74–556 triangles) rather than a footprint box or the detail render mesh: 12 cm wall slabs open at every street door (1.6 × 3 m), the 2 m × 3 m carriage passage and between the courtyard pillars, so the player can walk into ground floors and courtyards. Windows are solid (glazed); upper floors are unreachable (no stairs).
 - **Water** — the river is a flat **solid** surface for now; there is no carved channel. Swimming comes with the water work.
 - **Map ends** — invisible walls at y = 0 and 32 km until the end caps exist.
 
@@ -212,15 +212,17 @@ Notes that will save time:
 
 ### Level of Detail Policy
 
-| Distance | Geometry | Shading | Shadows |
-|---|---|---|---|
-| 0–100 m | Prototype LOD0 (full facade, courtyard interior, passage) | Full PBR + detail maps | Full casting/receiving |
-| 100–600 m | LOD1 (facade planes, normal-mapped, courtyard kept) | Simplified PBR | Receiving only |
-| 600–2500 m | LOD2 (solid massing, courtyard filled, roof shape kept) | Flat shading | None |
-| 2.5–4 km | LOD3 (box, ~12 tris) or merged per-chunk batch | Baked colour | None |
-| 4 km+ | Backdrop shell only | Fog blend | None |
+Building prototypes come from `tools/prototypes.py` (format v2: exterior, glazing, interior and collision parts; see `docs/WORLD_PIPELINE.md` and `tools/PROTOTYPES_INTEGRATION.md`). Band edges live in `prototypes.json`.
 
-Chunks pick one LOD level for all their buildings; per-instance LOD selection is not worth the sort churn at these distances.
+| Distance | Geometry | Shading |
+|---|---|---|
+| 0–120 m | LOD0: real arched openings, deep reveals, sills, cornice, courtyard colonnade (4.5–23k tris); interior rooms within 150 m | Brick masonry; glazing with interior mapping |
+| 120–400 m | LOD1: real openings, 3-segment arches, shallow reveals (2–11k tris) | Same |
+| 400–1200 m | LOD2: plain walls (18–22 tris) | Windows redrawn on the bay grid with parallax |
+| 1.2 km+ | LOD3: same mesh as LOD2 | Windows redrawn flat, fading to average coverage |
+| 4 km+ | Backdrop shell (not built yet; LOD3 continues into the haze) | Fog blend |
+
+LOD is **per instance** within a 7 × 7 chunk ring around the camera (±10% hysteresis), and LOD3 for everything else, drawn as one whole-cylinder instanced draw per type. Per-chunk LOD was right when LOD0 was 12 triangles; at 15–23k it isn't. Building shadows (box proxies, not the thin-walled shell) are not implemented yet.
 
 ### Draw Call Budget
 
@@ -377,6 +379,9 @@ blender --background --python preview_network.py -- --out //preview.blend
 
 # one region, for iterating (~80 s for 5 x 5 km)
 python3 export_chunks.py --region 20080 13500 25100 18500 --out assets/world/
+
+# building prototypes only (seconds; export_chunks runs this too)
+python3 prototypes.py --out assets/world/ --report
 
 # everything, tile by tile (~1 hour, ~110 MB)
 python3 export_chunks.py --all --tile 5020 4000 --out assets/world/

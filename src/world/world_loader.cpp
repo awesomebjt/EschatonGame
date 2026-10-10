@@ -131,15 +131,38 @@ std::optional<WorldData> load_world(const std::string& dir)
     w.manifest = std::move(*manifest);
     const Manifest& m = w.manifest;
 
-    auto protos = load_prototypes(dir + "/prototypes.bin");
-    if (!protos) return std::nullopt;
+    auto index = load_prototype_index(dir + "/prototypes.json");
+    if (!index) return std::nullopt;
+    w.proto_index = std::move(*index);
     const size_t type_count = m.building_types.size();
+    const size_t lod_count  = w.proto_index.lod_bands.size();
     w.prototypes.resize(type_count);
-    for (PrototypeMesh& p : *protos)
-        if (p.lod == 0 && p.type < type_count) w.prototypes[p.type] = std::move(p);
+    for (BuildingPrototype& p : w.prototypes) p.lods.resize(lod_count);
+
+    // The interior file is 8 MB and loads with the rest; split it out to a lazy,
+    // evictable load once chunks stream.
+    for (const std::string* file : {&w.proto_index.shell_file, &w.proto_index.interior_file,
+                                    &w.proto_index.collision_file}) {
+        auto protos = load_prototypes(dir + "/" + *file);
+        if (!protos) return std::nullopt;
+        for (PrototypeMesh& p : *protos) {
+            if (p.type >= type_count || p.lod >= lod_count || p.part >= k_part_count) {
+                std::fprintf(stderr, "world: %s has an unexpected mesh (type %u, lod %u, part %u)\n",
+                             file->c_str(), p.type, p.lod, p.part);
+                return std::nullopt;
+            }
+            BuildingPrototype& bp = w.prototypes[p.type];
+            if (p.part == k_part_collision) bp.collision = std::move(p);
+            else                            bp.lods[p.lod][p.part] = std::move(p);
+        }
+    }
     for (size_t t = 0; t < type_count; ++t) {
-        if (w.prototypes[t].indices.empty()) {
-            std::fprintf(stderr, "world: prototypes.bin has no LOD0 mesh for type %zu\n", t);
+        const BuildingPrototype& bp = w.prototypes[t];
+        bool ok = !bp.collision.empty();
+        for (const auto& lod : bp.lods) ok = ok && !lod[k_part_exterior].empty();
+        if (!ok) {
+            std::fprintf(stderr,
+                         "world: prototypes lack an exterior LOD or collision mesh for type %zu\n", t);
             return std::nullopt;
         }
     }

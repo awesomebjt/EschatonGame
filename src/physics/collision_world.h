@@ -23,8 +23,8 @@ struct RayHit
 
 // Static collision geometry for a whole cylinder, in flat map space: the
 // exporter's terrain triangles (roads, platforms, bridge decks, monuments) and
-// every building instance tested against its prototype's LOD0 mesh, so courtyards
-// and passages stay open. Flat space is close enough: next to a wall the rendered
+// every building instance tested against its prototype's collision massing (a
+// few dozen triangles, not the detail shell), so courtyards and passages stay open. Flat space is close enough: next to a wall the rendered
 // (curved, rigid-building) world differs from it by about a millimetre.
 //
 // A uniform grid over the map, wrapping in x, lists which terrain triangles and
@@ -62,7 +62,9 @@ private:
     std::vector<int32_t> m_terrain_chunk;   // packed col | row << 16
 
     std::vector<Building>           m_buildings;
-    std::vector<std::vector<float>> m_proto;   // per type: 9 floats per triangle, local
+    std::vector<std::vector<float>> m_proto;       // per type: 9 floats per triangle, local
+    std::vector<std::vector<float>> m_proto_box;   // per type: local xy bounds per triangle,
+                                                   // (x0, y0, x1, y1), to reject before rotating
 
     // Grid: CSR lists of item ids; ids >= k_building_bit are buildings.
     static constexpr uint32_t k_building_bit = 0x80000000u;

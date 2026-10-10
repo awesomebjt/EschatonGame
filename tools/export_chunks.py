@@ -10,12 +10,13 @@ CPython (needs only numpy).
 --all runs tiles in parallel worker processes (default: half the logical CPUs, at low
 priority, one BLAS thread each). The whole-map
 network (river, hubs, boulevards) is computed once in the parent and shared, and only
-the parent writes manifest.json and prototypes.bin, after every tile has finished.
+the parent writes manifest.json and the building prototypes, after every tile has finished.
 
 What it writes
 --------------
 world/manifest.json         map constants, material palette, building catalogue, chunk list
-world/prototypes.bin        the 20 building types, LOD0 and LOD1, in local space
+world/prototypes*.bin       the 20 building types, via prototypes.py (format v2, see
+                            PROTOTYPES_INTEGRATION.md); rerun that alone for model changes
 world/chunk_<i>_<j>.bin     one file per chunk: terrain mesh + building/monument instances
 
 Everything is little-endian. Chunk geometry is stored relative to the chunk centre, so a
@@ -32,12 +33,6 @@ chunk_<i>_<j>.bin
     indices    u32
     buildings  { u16 type; u16 lod_hint; f32 x, y, z; f32 rot }   20 bytes each
     monuments  { u16 size; u16 pad;      f32 x, y, z }            16 bytes each
-
-prototypes.bin
-    magic      char[4]  "PROT"
-    version    u32      1
-    count      u32      number of (type, lod) meshes = 2 * len(BUILDING_TYPES)
-    then per mesh: u16 type, u16 lod, u32 vtx, u32 idx, vertices, indices (same layouts)
 
 Building instances are placed with: translate(x, y, z) * rotateZ(rot). No scaling - every
 type has fixed dimensions, which is why the catalogue instances cleanly.
@@ -56,6 +51,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paris_city as pc
+import prototypes
 
 pc.bpy = None                      # make sure the generator stays on the pure-Python path
 
@@ -112,28 +108,6 @@ def triangulate(acc, origin=(0.0, 0.0), default_mat=pc.MAT_BUILDING):
 
 
 # --------------------------------------------------------------------------- #
-def write_prototypes(path):
-    """Each building type once, in local space: origin at the middle of the street-facing
-    edge, +X along the street, +Y away from it, +Z up."""
-    meshes = []
-    for ti, T in enumerate(pc.BUILDING_TYPES):
-        poly = [(x - T.F / 2.0, y) for x, y in T.local]
-        for lod in (0, 1):
-            acc = pc.MeshAcc()
-            if lod == 0 and T.courtyard:
-                pc.add_courtyard_building(acc, poly, T.H, pc.MAT_BUILDING)
-            else:
-                pc.add_prism(acc, poly, T.H, pc.MAT_BUILDING)
-            meshes.append((ti, lod) + triangulate(acc))
-    with open(path, "wb") as f:
-        f.write(b"PROT" + struct.pack("<2I", VERSION, len(meshes)))
-        for ti, lod, vtx, idx, nv, ni in meshes:
-            f.write(struct.pack("<2H2I", ti, lod, nv, ni))
-            f.write(vtx)
-            f.write(idx)
-    return len(meshes)
-
-
 def instance_of(T, poly):
     """Recover (type, x, y, rot) from a placed footprint: the generator lays every building
     out as origin + t*x + n*y, so the front edge gives the rotation directly."""
@@ -238,8 +212,7 @@ def write_manifest(out_dir, chunk_list):
 
 def export_and_index(region, out_dir, network=None):
     chunk_list = export_region(region, out_dir, network)
-    n = write_prototypes(os.path.join(out_dir, "prototypes.bin"))
-    print(f"  prototypes.bin: {n} meshes")
+    prototypes.build_all(out_dir)
     write_manifest(out_dir, chunk_list)
 
 
@@ -305,9 +278,9 @@ def export_all(tile, out_dir, jobs):
         print(f"{len(failed)} tile(s) failed: {sorted(failed)}; manifest not written",
               file=sys.stderr)
         return False
-    n = write_prototypes(os.path.join(out_dir, "prototypes.bin"))
+    prototypes.build_all(out_dir)
     write_manifest(out_dir, chunk_list)
-    print(f"done: {len(chunk_list)} chunks, prototypes.bin {n} meshes, "
+    print(f"done: {len(chunk_list)} chunks, "
           f"{time.time() - t0:.0f} s total")
     return True
 
