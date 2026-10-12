@@ -2,11 +2,15 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace render {
 
 namespace {
+
+std::string g_shader_dir = SHADER_DIR;
 
 // Map bgfx renderer type to the subdirectory name used by bgfx_compile_shaders.
 const char* shader_backend()
@@ -26,7 +30,7 @@ const char* shader_backend()
 bgfx::ShaderHandle load_shader_binary(const char* sc_filename)
 {
     char path[512];
-    std::snprintf(path, sizeof(path), SHADER_DIR "/%s/%s.bin", shader_backend(), sc_filename);
+    std::snprintf(path, sizeof(path), "%s/%s/%s.bin", g_shader_dir.c_str(), shader_backend(), sc_filename);
 
     FILE* f = std::fopen(path, "rb");
     if (!f)
@@ -55,6 +59,9 @@ bgfx::ShaderHandle load_shader_binary(const char* sc_filename)
 }
 
 } // namespace
+
+void               set_shader_dir(std::string dir) { g_shader_dir = std::move(dir); }
+const std::string& shader_dir() { return g_shader_dir; }
 
 bgfx::ProgramHandle load_program(const char* vs_name, const char* fs_name)
 {

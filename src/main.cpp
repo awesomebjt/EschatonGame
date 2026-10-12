@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -25,6 +26,7 @@
 #include "physics/rotating_frame.h"
 #include "render/avatar_renderer.h"
 #include "render/cloud_renderer.h"
+#include "render/shader.h"
 #include "render/world_renderer.h"
 #include "world/world_loader.h"
 #include "world/wrap.h"
@@ -81,6 +83,10 @@ struct StartupLine { const char* code; bool show; };
 static std::vector<StartupLine> g_console_lines;   // --console / --exec, run once the world loads
 static bool                     g_startup_done = false;
 static uint64_t                 g_startup_at   = 0;   // ns, when the world finished loading
+
+// Where the world data lives; see resolve_data_dirs. Shaders are held by render::shader_dir().
+static std::string g_world_dir;
+static std::string g_shader_dir_arg;
 
 // --shot: render one frame of the world to a PNG and exit (for headless checks).
 static const char* g_shot_path = nullptr;
@@ -150,9 +156,9 @@ static BgfxCallback g_bgfx_callback;
 static bool load_scene()
 {
     const uint64_t t0 = SDL_GetTicksNS();
-    auto world = world::load_world(WORLD_DIR);
+    auto world = world::load_world(g_world_dir);
     if (!world) {
-        fprintf(stderr, "load_scene: failed to load world from %s\n", WORLD_DIR);
+        fprintf(stderr, "load_scene: failed to load world from %s\n", g_world_dir.c_str());
         return false;
     }
     const uint64_t t1 = SDL_GetTicksNS();
@@ -443,6 +449,8 @@ static void free_scene()
 //   --exec <ruby>             run a line without opening the console (repeatable)
 //   --server [--port <n>]     run headless as a multiplayer server; prints the invite code
 //   --connect <host[:port]> <invite>   join a server once the world has loaded
+//   --world <dir>             world data (manifest.json, prototypes, chunks)
+//   --shaders <dir>           compiled shaders (<dir>/<backend>/*.bin)
 static bool parse_args(int argc, char* argv[])
 {
     for (int i = 1; i < argc; ++i) {
@@ -464,6 +472,10 @@ static bool parse_args(int argc, char* argv[])
             g_console_lines.push_back({argv[++i], true});
         } else if (!strcmp(a, "--exec") && i + 1 < argc) {
             g_console_lines.push_back({argv[++i], false});
+        } else if (!strcmp(a, "--world") && i + 1 < argc) {
+            g_world_dir = argv[++i];
+        } else if (!strcmp(a, "--shaders") && i + 1 < argc) {
+            g_shader_dir_arg = argv[++i];
         } else if (!strcmp(a, "--server")) {
             g_server_mode = true;
         } else if (!strcmp(a, "--port") && i + 1 < argc) {
@@ -487,13 +499,32 @@ static bool parse_args(int argc, char* argv[])
         } else {
             fprintf(stderr, "usage: %s [--shot file.png] [--pos x y alt] [--view yaw pitch] "
                             "[--noclip] [--console ruby]... [--exec ruby]...\n"
-                            "       [--connect host[:port] invite]\n"
+                            "       [--connect host[:port] invite] [--world dir] [--shaders dir]\n"
                             "       %s --server [--port n]\n",
                     argv[0], argv[0]);
             return false;
         }
     }
     return true;
+}
+
+// Data directories, in order: --world / --shaders; world/ and shaders/ beside
+// the executable (a packaged game, see the dist target); the build tree the
+// binary was compiled in (WORLD_DIR, SHADER_DIR), so running from build/ works.
+static void resolve_data_dirs()
+{
+    std::error_code ec;
+    const std::filesystem::path base = SDL_GetBasePath() ? SDL_GetBasePath() : "";
+    if (g_world_dir.empty()) {
+        const auto beside = base / "world";
+        g_world_dir = std::filesystem::is_regular_file(beside / "manifest.json", ec) ? beside.string() : WORLD_DIR;
+    }
+    if (!g_shader_dir_arg.empty()) {
+        render::set_shader_dir(g_shader_dir_arg);
+    } else if (const auto beside = base / "shaders"; std::filesystem::is_directory(beside, ec)) {
+        render::set_shader_dir(beside.string());
+    }
+    printf("world:   %s\nshaders: %s\n", g_world_dir.c_str(), render::shader_dir().c_str());
 }
 
 // -----------------------------------------------------------------------
@@ -506,6 +537,7 @@ int main(int argc, char* argv[])
         return 1;
     if (g_server_mode)
         return run_server();
+    resolve_data_dirs();
 
     // ---------------------------------------------------------------
     // SDL3: window

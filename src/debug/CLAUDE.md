@@ -40,3 +40,10 @@ Scope: the Shift+` drop-down console (`console.*`) and the Ruby commands it expo
 - `screenshot` captures the console too, if it is open.
 - Evaluation and drawing were verified via `--console` + `--shot`; the live keyboard
   path (toggle, editing, history, paste) had no automated check when it landed.
+- **A stale mruby parser breaks Ruby in odd ways** (`@x ||= new` gives `false`, `ARRAY[i]`
+  raises "undefined method 'ar'"). mruby numbers method names at build time (presym);
+  if `mrbgems/mruby-compiler/core/y.tab.o` predates the presym table, the parser emits
+  the wrong numbers. Rake can't always regenerate `y.tab.c` itself (it says "Don't know
+  how to build task …/y.tab.o"); generate it with mruby's bundled lrama, no bison needed:
+  `ruby tools/lrama/exe/lrama -o y.tab.c parse.y` in `build/_deps/mruby-src/mrbgems/mruby-compiler/core`,
+  then delete `build/mruby` and rebuild.

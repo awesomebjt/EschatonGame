@@ -267,6 +267,23 @@ add_executable(clouds_check EXCLUDE_FROM_ALL tests/clouds_check.cpp src/world/cl
 target_include_directories(clouds_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # ---------------------------------------------------------------------------
+# dist: a self-contained copy to hand to other machines (build/dist/eschaton and
+# a .tar.gz of it). The game looks for world/ and shaders/ beside itself.
+# ---------------------------------------------------------------------------
+set(DIST_DIR ${CMAKE_BINARY_DIR}/dist/eschaton)
+add_custom_target(dist
+    COMMAND ${CMAKE_COMMAND}
+            -DEXE=$<TARGET_FILE:eschaton>
+            -DSHADER_DIR=${SHADER_OUTPUT_DIR}
+            -DWORLD_DIR=${CMAKE_SOURCE_DIR}/world
+            -DDIST_DIR=${DIST_DIR}
+            -P ${CMAKE_SOURCE_DIR}/cmake/package_dist.cmake
+    DEPENDS eschaton compile_shaders
+    COMMENT "Packaging the game into ${DIST_DIR}"
+    VERBATIM
+)
+
+# ---------------------------------------------------------------------------
 # Install (optional, for packaging later)
 # ---------------------------------------------------------------------------
 install(TARGETS eschaton DESTINATION bin)
