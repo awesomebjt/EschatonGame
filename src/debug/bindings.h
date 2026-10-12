@@ -4,6 +4,7 @@
 
 #include <entt/entity/fwd.hpp>
 
+namespace net { class Client; }
 namespace physics { class CollisionWorld; struct RotatingFrame; }
 namespace render { struct CameraPos; class CloudRenderer; class WorldRenderer; }
 
@@ -32,10 +33,14 @@ struct DebugHost
     const physics::CollisionWorld*  collision = nullptr;
     const physics::RotatingFrame*   frame     = nullptr;
     render::CloudRenderer*          clouds    = nullptr;
+
+    // Multiplayer: the session (idle when not connected) and its clock.
+    const net::Client*              net       = nullptr;
+    const double*                   net_time  = nullptr;   // seconds
 };
 
-// Defines Camera, Player, Fog, Clouds and the top-level helpers (teleport, look, screenshot,
-// quit, help, clear) in the console's VM.
+// Defines Camera, Player, Fog, Clouds, Players and the top-level helpers (me, teleport, look,
+// screenshot, quit, help, clear) in the console's VM.
 void install_bindings(Console& console, DebugHost& host);
 
 } // namespace debug

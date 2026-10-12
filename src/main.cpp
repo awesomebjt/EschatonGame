@@ -1,9 +1,11 @@
 #include <cmath>
+#include <csignal>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <bgfx/bgfx.h>
@@ -15,9 +17,13 @@
 
 #include "debug/bindings.h"
 #include "debug/console.h"
+#include "ecs/components/physics.h"
 #include "game/player.h"
+#include "net/client.h"
+#include "net/server.h"
 #include "physics/collision_world.h"
 #include "physics/rotating_frame.h"
+#include "render/avatar_renderer.h"
 #include "render/cloud_renderer.h"
 #include "render/world_renderer.h"
 #include "world/world_loader.h"
@@ -73,9 +79,23 @@ static debug::Console   g_console;
 static debug::DebugHost g_debug_host;
 struct StartupLine { const char* code; bool show; };
 static std::vector<StartupLine> g_console_lines;   // --console / --exec, run once the world loads
+static bool                     g_startup_done = false;
+static uint64_t                 g_startup_at   = 0;   // ns, when the world finished loading
 
 // --shot: render one frame of the world to a PNG and exit (for headless checks).
 static const char* g_shot_path = nullptr;
+
+// Multiplayer. --server runs headless and never reaches the window code;
+// --connect joins one once the world has loaded.
+static bool                  g_server_mode = false;
+static uint16_t              g_port        = net::k_default_port;
+static std::string           g_connect_host;
+static uint16_t              g_connect_port = net::k_default_port;
+static net::Invite           g_connect_invite{};
+static net::Client           g_net;
+static double                g_net_time = 0;     // seconds, the clock g_net runs on
+static render::AvatarRenderer g_avatars;
+static std::vector<render::Avatar> g_avatar_list;
 
 // -----------------------------------------------------------------------
 // bgfx callback: forwards traces and writes screenshots as PNG
@@ -160,6 +180,9 @@ static bool load_scene()
     if (!g_clouds.create(m.radius, m.map_w, m.map_h))
         fprintf(stderr, "load_scene: cloud shaders missing; no clouds\n");
     const uint64_t t4 = SDL_GetTicksNS();
+    const ecs::CapsuleCollider capsule;   // other players are drawn as the same capsule
+    if (!g_avatars.create(m.radius, capsule.radius, capsule.height))
+        fprintf(stderr, "load_scene: avatar shaders missing; other players are invisible\n");
 
     // Start on a street near the middle of the map, or wherever --pos says.
     double px = 0.5 * m.map_w, py = 0.5 * m.map_h, palt = 0;
@@ -183,6 +206,15 @@ static bool load_scene()
            static_cast<unsigned long long>(st.building_instances), st.building_draws,
            world->monument_count, (t1 - t0) * 1e-9, (t2 - t1) * 1e-9, (t3 - t2) * 1e-9,
            g_clouds.cloud_count(), g_clouds.puff_count(), (t4 - t3) * 1e-9);
+
+    // Join after the load, not before: the load blocks for seconds, long enough
+    // for the server to start counting a silent client as gone.
+    if (!g_connect_host.empty()) {
+        if (g_net.connect(g_connect_host, g_connect_port, g_connect_invite))
+            printf("net: connecting to %s\n", g_net.endpoint().c_str());
+        else
+            fprintf(stderr, "net: cannot resolve %s\n", g_connect_host.c_str());
+    }
     return true;
 }
 
@@ -303,8 +335,88 @@ static void render_scene()
     g_world.cloud_shadow.offset_x = g_clouds.offset_x();
     g_world.cloud_shadow.offset_y = g_clouds.offset_y();
     g_world.submit(0, g_cam, reversed_z);
+    g_avatars.submit(0, g_cam, reversed_z, g_world.fog, g_avatar_list);
     // Blended, so bgfx sorts it after the opaque world within the view.
     g_clouds.submit(0, g_cam, reversed_z, g_world.fog);
+}
+
+// -----------------------------------------------------------------------
+// Multiplayer
+// -----------------------------------------------------------------------
+
+// What this client reports: the feet when walking, the camera less eye height in
+// noclip, so the others see the capsule where this player's eyes are.
+static net::PlayerState local_net_state()
+{
+    net::PlayerState s;
+    s.yaw   = g_cam_yaw;
+    s.pitch = g_cam_pitch;
+    if (g_noclip) {
+        s.x     = g_cam.x;
+        s.y     = g_cam.y;
+        s.alt   = g_cam.alt - game::k_eye_height;
+        s.flags = net::k_flag_noclip;
+    } else {
+        const game::PlayerView pv = game::player_view(g_registry, g_player, g_cylinder_radius);
+        s.x   = pv.x;
+        s.y   = pv.y;
+        s.alt = pv.alt;
+        for (int k = 0; k < 3; ++k) s.vel[k] = pv.v[k];
+        s.flags = pv.grounded ? net::k_flag_grounded : 0;
+    }
+    return s;
+}
+
+static void update_net(bool world_ready)
+{
+    g_net_time = SDL_GetTicksNS() * 1e-9;
+    if (world_ready && g_player != entt::null) {
+        const net::PlayerState s = local_net_state();
+        g_net.update(g_net_time, &s);
+    } else {
+        g_net.update(g_net_time, nullptr);
+    }
+
+    g_avatar_list.clear();
+    for (int c = 0; c < net::k_max_players; ++c) {
+        const auto color = static_cast<net::PlayerColor>(c);
+        if (auto st = g_net.remote(color, g_net_time)) {
+            render::Avatar a;
+            a.x   = st->x;
+            a.y   = st->y;
+            a.alt = st->alt;
+            a.yaw = st->yaw;
+            const auto rgb = net::color_rgb(color);
+            for (int k = 0; k < 3; ++k) a.rgb[k] = rgb[k];
+            g_avatar_list.push_back(a);
+        }
+    }
+}
+
+static volatile std::sig_atomic_t g_stop_server = 0;
+static void on_stop_signal(int) { g_stop_server = 1; }
+
+// --server: no window, no GPU, no world; just the ledger.
+static int run_server()
+{
+    setvbuf(stdout, nullptr, _IOLBF, 0);   // events show up promptly when piped
+    const net::Invite invite = net::make_invite();
+    net::Server server;
+    if (!server.start(g_port, invite, stdout)) return 1;
+
+    printf("Eschaton server listening on UDP port %u (up to %d players)\n"
+           "invite code: %s\n"
+           "join with:   eschaton --connect <this-host>:%u %s\n"
+           "Ctrl+C stops the server.\n",
+           unsigned(g_port), net::k_max_players, net::invite_hex(invite).c_str(), unsigned(g_port),
+           net::invite_hex(invite).c_str());
+
+    std::signal(SIGINT, on_stop_signal);
+    std::signal(SIGTERM, on_stop_signal);
+    while (!g_stop_server) server.service(10);
+    printf("shutting down\n");
+    server.stop();
+    return 0;
 }
 
 // -----------------------------------------------------------------------
@@ -313,6 +425,7 @@ static void render_scene()
 
 static void free_scene()
 {
+    g_avatars.destroy();
     g_clouds.destroy();
     g_world.destroy();
     g_scene_loaded = false;
@@ -328,6 +441,8 @@ static void free_scene()
 //   --noclip                  start free-flying instead of walking
 //   --console <ruby>          open the console and run a line (repeatable)
 //   --exec <ruby>             run a line without opening the console (repeatable)
+//   --server [--port <n>]     run headless as a multiplayer server; prints the invite code
+//   --connect <host[:port]> <invite>   join a server once the world has loaded
 static bool parse_args(int argc, char* argv[])
 {
     for (int i = 1; i < argc; ++i) {
@@ -349,10 +464,32 @@ static bool parse_args(int argc, char* argv[])
             g_console_lines.push_back({argv[++i], true});
         } else if (!strcmp(a, "--exec") && i + 1 < argc) {
             g_console_lines.push_back({argv[++i], false});
+        } else if (!strcmp(a, "--server")) {
+            g_server_mode = true;
+        } else if (!strcmp(a, "--port") && i + 1 < argc) {
+            const long p = strtol(argv[++i], nullptr, 10);
+            if (p <= 0 || p > 65535) {
+                fprintf(stderr, "--port: not a port number: %s\n", argv[i]);
+                return false;
+            }
+            g_port = static_cast<uint16_t>(p);
+        } else if (!strcmp(a, "--connect") && i + 2 < argc) {
+            if (!net::parse_endpoint(argv[++i], g_connect_host, g_connect_port)) {
+                fprintf(stderr, "--connect: expected host or host:port, got %s\n", argv[i]);
+                return false;
+            }
+            const auto code = net::parse_invite(argv[++i]);
+            if (!code) {
+                fprintf(stderr, "--connect: the invite code is %zu hex digits\n", 2 * net::k_invite_bytes);
+                return false;
+            }
+            g_connect_invite = *code;
         } else {
             fprintf(stderr, "usage: %s [--shot file.png] [--pos x y alt] [--view yaw pitch] "
-                            "[--noclip] [--console ruby]... [--exec ruby]...\n",
-                    argv[0]);
+                            "[--noclip] [--console ruby]... [--exec ruby]...\n"
+                            "       [--connect host[:port] invite]\n"
+                            "       %s --server [--port n]\n",
+                    argv[0], argv[0]);
             return false;
         }
     }
@@ -367,6 +504,8 @@ int main(int argc, char* argv[])
 {
     if (!parse_args(argc, argv))
         return 1;
+    if (g_server_mode)
+        return run_server();
 
     // ---------------------------------------------------------------
     // SDL3: window
@@ -436,7 +575,8 @@ int main(int argc, char* argv[])
     if (g_console.create()) {
         g_debug_host = {&g_cam, &g_cam_yaw, &g_cam_pitch, k_pitch_max, &g_fly_speed,
                         g_cylinder_radius, g_map_h, &g_world, &running,
-                        &g_registry, &g_player, &g_noclip, &g_collision, &g_frame, &g_clouds};
+                        &g_registry, &g_player, &g_noclip, &g_collision, &g_frame, &g_clouds,
+                        &g_net, &g_net_time};
         debug::install_bindings(g_console, g_debug_host);
     }
 
@@ -569,9 +709,7 @@ int main(int argc, char* argv[])
                     if (++g_load_wait > 2) {
                         g_scene_loaded = load_scene();
                         g_load_failed  = !g_scene_loaded;
-                        // After the load, so commands see the manifest's map bounds.
-                        for (const StartupLine& line : g_console_lines)
-                            g_console.run_line(line.code, window, line.show);
+                        g_startup_at   = SDL_GetTicksNS();
                         last_ticks     = SDL_GetTicksNS();   // don't fly off on the long frame
                     }
                 } else if (g_load_failed) {
@@ -581,6 +719,19 @@ int main(int argc, char* argv[])
                 }
 
                 if (g_scene_loaded) {
+                    // Startup lines run after the load, so commands see the manifest's
+                    // map bounds; when joining a server, also after the other players
+                    // have shown up (or 5 s), so commands and --shot frames see them.
+                    if (!g_startup_done) {
+                        const bool joining = g_net.status() == net::Client::Status::Connecting
+                                          || g_net.status() == net::Client::Status::Handshake
+                                          || (g_net.in_session() && g_net.snapshots() < 10);
+                        if (!joining || SDL_GetTicksNS() - g_startup_at > 5'000'000'000ull) {
+                            for (const StartupLine& line : g_console_lines)
+                                g_console.run_line(line.code, window, line.show);
+                            g_startup_done = true;
+                        }
+                    }
                     g_clouds.update(dt);
                     // The player keeps simulating (and falling) while the console is
                     // open; it just doesn't hear the keyboard.
@@ -590,6 +741,7 @@ int main(int argc, char* argv[])
                     } else {
                         update_player(dt, take_input);
                     }
+                    update_net(true);
                     render_scene();
 
                     const bgfx::Stats* st = bgfx::getStats();
@@ -602,6 +754,9 @@ int main(int argc, char* argv[])
                         "frame %5.2f ms  gpu %5.2f ms  %u draws",
                         g_cam.x, g_cam.y, g_cam.alt, bx::toDeg(g_cam_yaw), bx::toDeg(g_cam_pitch),
                         cpu_ms, gpu_ms, st->numDraw);
+                    if (g_net.status() != net::Client::Status::Idle)
+                        bgfx::dbgTextPrintf(1, 3, g_net.in_session() ? 0x0B : 0x0C, "NET  %s",
+                                            g_net.describe().c_str());
                     if (g_noclip) {
                         bgfx::dbgTextPrintf(1, 2, 0x07, "NOCLIP  WASD fly, Space/C up/down, Shift fast, F walk, Esc menu");
                     } else {
@@ -614,7 +769,7 @@ int main(int argc, char* argv[])
 
                     // --shot: let a few frames settle, capture, wait for the
                     // render thread to hand the image back, then exit.
-                    if (g_shot_path) {
+                    if (g_shot_path && g_startup_done) {
                         ++shot_frame;
                         if (shot_frame == 4)
                             bgfx::requestScreenShot(bgfx::FrameBufferHandle BGFX_INVALID_HANDLE, g_shot_path);
@@ -634,6 +789,7 @@ int main(int argc, char* argv[])
     // ---------------------------------------------------------------
     // Shutdown
     // ---------------------------------------------------------------
+    g_net.disconnect();
     free_scene();
     g_console.destroy();
     bgfx::shutdown();

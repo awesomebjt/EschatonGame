@@ -80,6 +80,21 @@ include(${bgfx_cmake_SOURCE_DIR}/cmake/bgfxToolUtils.cmake)
 set(BGFX_SHADER_INCLUDE_PATH "${bgfx_cmake_SOURCE_DIR}/bgfx/src"
     CACHE STRING "bgfx shader include directory" FORCE)
 
+# --- ENet (UDP networking for multiplayer) ----------------------------------
+# Reliable and unreliable channels over UDP, connection management, no
+# dependencies. Its CMakeLists only sets include dirs for itself, so add them.
+FetchContent_Declare(
+    enet
+    GIT_REPOSITORY https://github.com/lsalzman/enet.git
+    GIT_TAG        v1.3.18
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(enet)
+target_include_directories(enet INTERFACE ${enet_SOURCE_DIR}/include)
+if(WIN32)
+    target_link_libraries(enet INTERFACE ws2_32 winmm)
+endif()
+
 # --- mruby (embedded Ruby for the debug console) ----------------------------
 # mruby builds with its own rake toolchain, not CMake, so fetch the source only
 # and drive rake from a custom command. Requires ruby and rake on the host.
@@ -132,6 +147,7 @@ bgfx_compile_shaders(
                 ${SHADER_SRC_DIR}/vs_building.sc
                 ${SHADER_SRC_DIR}/vs_overlay.sc
                 ${SHADER_SRC_DIR}/vs_cloud.sc
+                ${SHADER_SRC_DIR}/vs_avatar.sc
     VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
     INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
@@ -144,6 +160,7 @@ bgfx_compile_shaders(
                 ${SHADER_SRC_DIR}/fs_overlay.sc
                 ${SHADER_SRC_DIR}/fs_cloud.sc
                 ${SHADER_SRC_DIR}/fs_building.sc
+                ${SHADER_SRC_DIR}/fs_avatar.sc
     VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
     INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
@@ -170,8 +187,12 @@ add_executable(eschaton
     src/debug/bindings.cpp
     src/debug/console.cpp
     src/game/player.cpp
+    src/net/client.cpp
+    src/net/protocol.cpp
+    src/net/server.cpp
     src/physics/character.cpp
     src/physics/collision_world.cpp
+    src/render/avatar_renderer.cpp
     src/render/cloud_renderer.cpp
     src/render/shader.cpp
     src/render/world_renderer.cpp
@@ -207,6 +228,7 @@ target_link_libraries(eschaton PRIVATE
     bx
     bimg
     mruby
+    enet
 )
 
 target_include_directories(eschaton PRIVATE
@@ -230,6 +252,16 @@ target_compile_definitions(physics_check PRIVATE WORLD_DIR="${CMAKE_SOURCE_DIR}/
 target_include_directories(physics_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # bgfx only for headers (CameraPos lives beside the renderer).
 target_link_libraries(physics_check PRIVATE Threads::Threads EnTT::EnTT bgfx)
+
+# Headless multiplayer checks: an in-process server and bot clients over loopback.
+add_executable(net_check EXCLUDE_FROM_ALL
+    tests/net_check.cpp
+    src/net/client.cpp
+    src/net/protocol.cpp
+    src/net/server.cpp
+)
+target_include_directories(net_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(net_check PRIVATE Threads::Threads enet)
 
 add_executable(clouds_check EXCLUDE_FROM_ALL tests/clouds_check.cpp src/world/clouds.cpp)
 target_include_directories(clouds_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
