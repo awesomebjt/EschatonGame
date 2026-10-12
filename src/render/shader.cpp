@@ -20,8 +20,9 @@ const char* shader_backend()
         case bgfx::RendererType::Vulkan:     return "spirv";
         case bgfx::RendererType::OpenGL:     return "glsl";
         case bgfx::RendererType::OpenGLES:   return "essl";
-        case bgfx::RendererType::Direct3D11: return "dx11";
-        case bgfx::RendererType::Direct3D12: return "dx12";
+        // bgfx_compile_shaders names the s_5_0 output dxbc; D3D12 accepts it too.
+        case bgfx::RendererType::Direct3D11: return "dxbc";
+        case bgfx::RendererType::Direct3D12: return "dxbc";
         case bgfx::RendererType::Metal:      return "metal";
         default:                              return "spirv";
     }

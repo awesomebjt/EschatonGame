@@ -7,7 +7,18 @@
 # debug interpreter has no business opening sockets.
 
 MRuby::Build.new do |conf|
-  conf.toolchain :clang
+  # CMake passes the toolchain matching its compiler (clang, gcc or visualcpp);
+  # clang when run by hand.
+  toolchain = (ENV['MRUBY_TOOLCHAIN'] || 'clang').to_sym
+  conf.toolchain toolchain
+
+  # MSVC: the static C runtime (/MT), matching CMAKE_MSVC_RUNTIME_LIBRARY, so the
+  # game links one CRT and needs no redistributable.
+  if toolchain == :visualcpp
+    [conf.cc, conf.cxx].each do |c|
+      c.flags = c.flags.flatten.map { |f| f == '/MD' ? '/MT' : f }
+    end
+  end
 
   conf.gembox 'stdlib'
   conf.gembox 'stdlib-ext'

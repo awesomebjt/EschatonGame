@@ -622,6 +622,7 @@ Resolved since earlier drafts: procedural vs hand-authored world layout (procedu
 ## Key Reference Material
 
 - **World data formats and art contract**: `docs/WORLD_PIPELINE.md`
+- **Building and packaging (Linux, Steam Runtime, Windows)**: `docs/BUILDING.md`
 - **Decision log format**: `docs/decisions/README.md`
 - **Why the generator/terrain approach changed**: `docs/decisions/0001-generator-replaced-with-city-generator.md`
 - **O'Neill Cylinder Physics**: ω = sqrt(g/r), Coriolis acceleration = -2(ω × v), centrifugal gradient linear with radius

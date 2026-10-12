@@ -405,7 +405,13 @@ static void on_stop_signal(int) { g_stop_server = 1; }
 // --server: no window, no GPU, no world; just the ledger.
 static int run_server()
 {
-    setvbuf(stdout, nullptr, _IOLBF, 0);   // events show up promptly when piped
+    // Events show up promptly when piped. MSVC has no line buffering and treats
+    // _IOLBF with a zero size as an invalid parameter (abort), so go unbuffered.
+#ifdef _WIN32
+    setvbuf(stdout, nullptr, _IONBF, 0);
+#else
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+#endif
     const net::Invite invite = net::make_invite();
     net::Server server;
     if (!server.start(g_port, invite, stdout)) return 1;
@@ -514,7 +520,9 @@ static bool parse_args(int argc, char* argv[])
 static void resolve_data_dirs()
 {
     std::error_code ec;
-    const std::filesystem::path base = SDL_GetBasePath() ? SDL_GetBasePath() : "";
+    // SDL returns UTF-8; a plain char* path would be read in the Windows ANSI code page.
+    const char* sdl_base = SDL_GetBasePath();
+    const std::filesystem::path base(reinterpret_cast<const char8_t*>(sdl_base ? sdl_base : ""));
     if (g_world_dir.empty()) {
         const auto beside = base / "world";
         g_world_dir = std::filesystem::is_regular_file(beside / "manifest.json", ec) ? beside.string() : WORLD_DIR;

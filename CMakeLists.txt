@@ -30,7 +30,13 @@ endif()
 # this takes a few minutes; subsequent configures use the CMake cache.
 # ---------------------------------------------------------------------------
 include(FetchContent)
-set(FETCHCONTENT_QUIET OFF)   # Show download progress during first configure
+set(FETCHCONTENT_QUIET OFF)
+
+# MSVC: link the C runtime statically (/MT) in every target, dependencies and
+# mruby included (cmake/mruby_config.rb), so the game runs on machines without
+# the Visual C++ redistributable. Set before the dependencies are declared.
+# Ignored by other compilers.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")   # Show download progress during first configure
 
 # --- EnTT (header-only ECS) -------------------------------------------------
 FetchContent_Declare(
@@ -93,6 +99,8 @@ FetchContent_MakeAvailable(enet)
 target_include_directories(enet INTERFACE ${enet_SOURCE_DIR}/include)
 if(WIN32)
     target_link_libraries(enet INTERFACE ws2_32 winmm)
+    # enet.h pulls in <windows.h>, whose min/max macros break std::min/std::max.
+    target_compile_definitions(enet INTERFACE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
 # --- mruby (embedded Ruby for the debug console) ----------------------------
@@ -107,17 +115,40 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(mruby)
 
-find_program(RAKE_EXECUTABLE rake REQUIRED)
+if(WIN32)
+    # rake is a .bat on Windows; run it through ruby rather than rely on the
+    # custom command's shell to launch batch files.
+    find_program(RUBY_EXECUTABLE ruby REQUIRED)
+    set(RAKE_COMMAND ${RUBY_EXECUTABLE} -S rake)
+else()
+    find_program(RAKE_EXECUTABLE rake REQUIRED)
+    set(RAKE_COMMAND ${RAKE_EXECUTABLE})
+endif()
+
+# mruby's own toolchain for the compiler CMake is using (read by mruby_config.rb).
+if(MSVC)
+    set(MRUBY_TOOLCHAIN visualcpp)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(MRUBY_TOOLCHAIN gcc)
+else()
+    set(MRUBY_TOOLCHAIN clang)
+endif()
+
 set(MRUBY_CONFIG    ${CMAKE_SOURCE_DIR}/cmake/mruby_config.rb)
 set(MRUBY_BUILD_DIR ${CMAKE_BINARY_DIR}/mruby)
-set(MRUBY_LIB       ${MRUBY_BUILD_DIR}/host/lib/libmruby.a)
+if(MSVC)
+    set(MRUBY_LIB   ${MRUBY_BUILD_DIR}/host/lib/libmruby.lib)
+else()
+    set(MRUBY_LIB   ${MRUBY_BUILD_DIR}/host/lib/libmruby.a)
+endif()
 
 add_custom_command(
     OUTPUT  ${MRUBY_LIB}
     COMMAND ${CMAKE_COMMAND} -E env
             MRUBY_CONFIG=${MRUBY_CONFIG}
             MRUBY_BUILD_DIR=${MRUBY_BUILD_DIR}
-            ${RAKE_EXECUTABLE} -f ${mruby_SOURCE_DIR}/Rakefile all
+            MRUBY_TOOLCHAIN=${MRUBY_TOOLCHAIN}
+            ${RAKE_COMMAND} -f ${mruby_SOURCE_DIR}/Rakefile all
     WORKING_DIRECTORY ${mruby_SOURCE_DIR}
     DEPENDS ${MRUBY_CONFIG}
     COMMENT "Building mruby"
@@ -141,6 +172,15 @@ add_dependencies(mruby mruby_build)
 set(SHADER_OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 set(SHADER_SRC_DIR    ${CMAKE_SOURCE_DIR}/shaders)
 
+# bgfx's defaults elsewhere (spirv, glsl, essl) are kept. On Windows it would
+# add s_6_0 (DXIL), which needs DXC beside shaderc; Direct3D 11 and 12 both take
+# s_5_0 (DXBC), and spirv covers Vulkan.
+if(WIN32)
+    set(SHADER_PROFILES PROFILES s_5_0 spirv)
+else()
+    set(SHADER_PROFILES "")
+endif()
+
 bgfx_compile_shaders(
     TYPE        VERTEX
     SHADERS     ${SHADER_SRC_DIR}/vs_terrain.sc
@@ -151,6 +191,7 @@ bgfx_compile_shaders(
     VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
     INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
+    ${SHADER_PROFILES}
     OUT_FILES_VAR VS_OUTPUT_FILES
 )
 
@@ -164,6 +205,7 @@ bgfx_compile_shaders(
     VARYING_DEF ${SHADER_SRC_DIR}/varying.def.sc
     INCLUDE_DIRS ${SHADER_SRC_DIR}
     OUTPUT_DIR  ${SHADER_OUTPUT_DIR}
+    ${SHADER_PROFILES}
     OUT_FILES_VAR FS_OUTPUT_FILES
 )
 
@@ -215,6 +257,7 @@ target_compile_options(eschaton PRIVATE
     >
     $<$<CXX_COMPILER_ID:MSVC>:
         /W4 /permissive-
+        /utf-8                  # sources are UTF-8 without a BOM
     >
 )
 
@@ -268,7 +311,7 @@ target_include_directories(clouds_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # ---------------------------------------------------------------------------
 # dist: a self-contained copy to hand to other machines (build/dist/eschaton and
-# a .tar.gz of it). The game looks for world/ and shaders/ beside itself.
+# a .tar.gz of it, .zip on Windows). The game looks for world/ and shaders/ beside itself.
 # ---------------------------------------------------------------------------
 set(DIST_DIR ${CMAKE_BINARY_DIR}/dist/eschaton)
 add_custom_target(dist
