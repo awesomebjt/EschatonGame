@@ -1,9 +1,10 @@
 # Building Eschaton
 
 All builds produce the same thing: `cmake --build <dir> --target dist` assembles
-`<dir>/dist/eschaton/` (executable, `shaders/`, `world/`) plus an archive of it,
-`.tar.gz` on Linux and `.zip` on Windows. Unpack it anywhere and run `eschaton`;
-it finds `world/` and `shaders/` beside itself.
+`<dir>/dist/eschaton/` (the game `eschaton`, the server `eschaton_server`,
+`shaders/`, `world/`) plus an archive of it, `.tar.gz` on Linux and `.zip` on
+Windows. Unpack it anywhere and run `eschaton`; it finds `world/` and `shaders/`
+beside itself.
 
 Every build needs network access on first configure (FetchContent pulls SDL3,
 bgfx, EnTT, ENet and mruby) and **Ruby with rake** on the build machine (mruby is
@@ -84,11 +85,23 @@ Linux builds are unchanged):
 
 ## Running a multiplayer test
 
-- Server: `eschaton --server` (no window, no world or shaders needed). It prints
+- Server: `eschaton_server` (or `eschaton --server`, the same thing). It prints
   an invite code, new on every start, and listens on **UDP 47210** (`--port n`).
+  `eschaton_server` is the one for a headless machine: ~0.4 MB, no window, world
+  or shaders, and nothing beyond the C and C++ runtimes (no X11, GL or Wayland
+  libraries, which the game binary needs even with `--server`). Built in the
+  Fedora 44 toolbox it needs glibc 2.34 or newer (Amazon Linux 2023, Ubuntu 22.04,
+  Debian 12, RHEL 9). It uses about 5 MB of RAM and ~2% of one core; four players
+  move about 11 KB/s in and 32 KB/s out, so the smallest instance is plenty and
+  the region (latency to the players) matters more than the size.
   Open that port on the server: `firewall-cmd --add-port=47210/udp` on Fedora,
   `New-NetFirewallRule -DisplayName Eschaton -Direction Inbound -Protocol UDP -LocalPort 47210 -Action Allow`
   on Windows, and the security group on EC2.
 - Clients: `eschaton --connect <server>[:port] <invite>`.
-- Under Wayland, a hidden or minimised game window stops presenting frames and so
-  stops sending its position; keep it visible, or run with `SDL_VIDEO_DRIVER=x11`.
+- A client stays connected while its game stalls (loading, a minimised window
+  under Wayland, a debugger): networking runs on its own thread. Its player just
+  stands still for the others until the game resumes. The game itself still
+  stops rendering while the compositor isn't presenting its window, so for
+  scripted runs (`--shot`, `--exec`) keep the window visible or use
+  `SDL_VIDEO_DRIVER=x11`; several windows opened at once from the background may
+  all be held back by GNOME.

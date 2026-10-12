@@ -264,6 +264,21 @@ int main(int argc, char** argv)
     check(bots.back().client->in_session() && bots.back().client->color() == gone,
           "a new player takes the free colour");
 
+    // A game that stalls (a load, a window the compositor stops presenting, a
+    // debugger) stops calling update(); its network thread keeps the link up past
+    // ENet's 8 s worst-case timeout, and the others still see it.
+    {
+        const net::PlayerColor stalled = *bots[0].client->color();
+        std::vector<Bot> others;
+        for (size_t i = 1; i < bots.size(); ++i) others.push_back(std::move(bots[i]));
+        pump(server, others, 9.0, t0);
+        bool still_seen = true;
+        for (Bot& b : others) still_seen = still_seen && b.client->remote(stalled, now());
+        for (size_t i = 1; i < bots.size(); ++i) bots[i] = std::move(others[i - 1]);
+        check(bots[0].client->in_session() && server.player_count() == 4 && still_seen,
+              "a client whose game stalls for 9 s keeps its seat");
+    }
+
     // Shutting the server down tells the clients.
     server.stop();
     pump(server, bots, 0.3, t0);

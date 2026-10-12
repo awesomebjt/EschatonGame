@@ -1,9 +1,12 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include "net/protocol.h"
 
@@ -15,6 +18,12 @@ namespace net {
 // The game's side of a multiplayer session: connects, presents the invite code,
 // streams the local player's state at k_send_hz and keeps a short history of
 // every other player's state for interpolation.
+//
+// All ENet traffic runs on a thread of its own, started by connect(), so the
+// connection survives the game's main loop stalling: a long load, a window the
+// compositor stops presenting (minimised under Wayland blocks on vsync), a
+// debugger. ENet drops a peer that goes 3-8 s unanswered. The public methods
+// are for the game's thread and are safe against the network thread.
 class Client
 {
 public:
@@ -27,18 +36,18 @@ public:
     // Graceful leave; waits up to ~200 ms for the server to acknowledge.
     void disconnect();
 
-    // Handles network events and, in session, sends `local` if a send is due
-    // (pass null before the local player exists). `now` is the caller's clock in
-    // seconds; it must be monotonic.
+    // Hands over the local player's latest state (null before it exists); the
+    // network thread sends the newest one at k_send_hz. `now` is the caller's
+    // clock in seconds, monotonic, and is the clock remote() takes.
     void update(double now, const PlayerState* local);
 
-    Status                     status() const { return m_status; }
-    bool                       in_session() const { return m_status == Status::InSession; }
-    Reject                     reject_reason() const { return m_reject; }
-    std::optional<PlayerColor> color() const { return m_color; }
-    const std::string&         endpoint() const { return m_endpoint; }
-    bool                       has_snapshot() const { return m_snapshots > 0; }
-    uint32_t                   snapshots() const { return m_snapshots; }
+    Status                     status() const;
+    bool                       in_session() const { return status() == Status::InSession; }
+    Reject                     reject_reason() const;
+    std::optional<PlayerColor> color() const;
+    const std::string&         endpoint() const { return m_endpoint; }   // set by connect() only
+    bool                       has_snapshot() const { return snapshots() > 0; }
+    uint32_t                   snapshots() const;
 
     // Another player's state as of `now` minus k_interp_delay, interpolated
     // between snapshots (extrapolated briefly from velocity if they run late).
@@ -61,8 +70,13 @@ private:
         uint32_t              count = 0;   // samples written, ever
     };
 
+    // Network thread: services ENet and sends until m_stop or the link drops.
+    void run();
+    // Under m_mutex, on the network thread; `now` is the client's own clock.
     void on_receive(const uint8_t* data, size_t size, double now);
+    static double clock();   // the client's own clock: steady, seconds
 
+    // Owned by the network thread while it runs; by the caller otherwise.
     ENetHost*   m_host = nullptr;
     ENetPeer*   m_peer = nullptr;
     Invite      m_invite{};
@@ -73,6 +87,17 @@ private:
 
     uint32_t m_seq = 0;
     double   m_next_send = 0;
+    uint32_t m_sent_version = 0;
+
+    std::thread       m_thread;
+    std::atomic<bool> m_stop{false};
+
+    // Everything below, and m_status, m_reject and m_color above, is shared
+    // between the threads and guarded by m_mutex.
+    mutable std::mutex m_mutex;
+    PlayerState        m_local;
+    uint32_t           m_local_version = 0;   // bumped by every update() with a state
+    double             m_caller_offset = 0;   // caller's clock minus ours
 
     std::array<History, k_max_players> m_players{};
     uint32_t m_last_tick = 0;

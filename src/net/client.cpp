@@ -1,6 +1,7 @@
 #include "net/client.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 
@@ -11,8 +12,9 @@ namespace net {
 
 namespace {
 
-constexpr double k_max_extrapolate = 0.25;   // s past the newest snapshot
-constexpr double k_offset_smoothing = 0.1;
+constexpr double   k_max_extrapolate  = 0.25;   // s past the newest snapshot
+constexpr double   k_offset_smoothing = 0.1;
+constexpr uint32_t k_max_wait_ms      = 10;     // longest ENet wait, so a stop is prompt
 
 float lerp_angle(float a, float b, float t)
 {
@@ -51,21 +53,33 @@ bool Client::connect(const std::string& host, uint16_t port, const Invite& invit
         m_host = nullptr;
         return false;
     }
-    m_invite    = invite;
-    m_endpoint  = host + ":" + std::to_string(port);
-    m_status    = Status::Connecting;
-    m_reject    = Reject::None;
-    m_color.reset();
-    m_seq       = 0;
-    m_next_send = 0;
-    m_players   = {};
-    m_last_tick = 0;
-    m_snapshots = 0;
+    m_invite       = invite;
+    m_endpoint     = host + ":" + std::to_string(port);
+    m_seq          = 0;
+    m_next_send    = 0;
+    m_sent_version = 0;
+    {
+        std::lock_guard lock(m_mutex);
+        m_status        = Status::Connecting;
+        m_reject        = Reject::None;
+        m_color.reset();
+        m_players       = {};
+        m_last_tick     = 0;
+        m_snapshots     = 0;
+        m_local_version = 0;
+    }
+    m_stop   = false;
+    m_thread = std::thread(&Client::run, this);
     return true;
 }
 
 void Client::disconnect()
 {
+    // The network thread owns ENet while it runs; take it back first.
+    m_stop = true;
+    if (m_thread.joinable()) m_thread.join();
+
+    std::lock_guard lock(m_mutex);
     if (!m_host) return;
     if (m_peer && (m_status == Status::InSession || m_status == Status::Handshake)) {
         enet_peer_disconnect(m_peer, k_client_bye);
@@ -82,43 +96,73 @@ void Client::disconnect()
     m_players = {};
 }
 
+double Client::clock()
+{
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
+
 void Client::update(double now, const PlayerState* local)
 {
-    if (!m_host) return;
+    std::lock_guard lock(m_mutex);
+    m_caller_offset = now - clock();
+    if (local) {
+        m_local = *local;
+        ++m_local_version;
+    }
+}
 
-    ENetEvent ev;
-    while (m_host && enet_host_service(m_host, &ev, 0) > 0) {
-        switch (ev.type) {
-            case ENET_EVENT_TYPE_CONNECT:
-                enet_peer_timeout(ev.peer, 8, 3000, 8000);
-                detail::send(ev.peer, k_channel_control, encode_hello(m_invite), true);
-                m_status = Status::Handshake;
-                break;
-            case ENET_EVENT_TYPE_RECEIVE:
-                on_receive(ev.packet->data, ev.packet->dataLength, now);
-                enet_packet_destroy(ev.packet);
-                break;
-            case ENET_EVENT_TYPE_DISCONNECT:
-                // A refused handshake arrives as a disconnect carrying the reason.
-                m_reject = static_cast<Reject>(ev.data);
-                m_status = m_reject == Reject::None || m_reject == Reject::ServerQuit ? Status::Lost
-                         : Status::Rejected;
-                enet_host_destroy(m_host);
-                m_host = nullptr;
-                m_peer = nullptr;
-                m_players = {};
-                return;
-            default:
-                break;
+void Client::run()
+{
+    while (!m_stop) {
+        // Wake for the next send, or soon enough to notice a stop.
+        double wait = k_max_wait_ms * 1e-3;
+        {
+            std::lock_guard lock(m_mutex);
+            if (m_status == Status::InSession && m_local_version != m_sent_version)
+                wait = std::clamp(m_next_send - clock(), 0.0, wait);
         }
-    }
+        ENetEvent ev;
+        int       r = enet_host_service(m_host, &ev, static_cast<uint32_t>(wait * 1000.0));
 
-    if (m_status == Status::InSession && local && now >= m_next_send) {
-        detail::send(m_peer, k_channel_state, encode_state(++m_seq, *local), false);
-        m_next_send += 1.0 / k_send_hz;
-        if (m_next_send < now) m_next_send = now + 1.0 / k_send_hz;
+        std::lock_guard lock(m_mutex);
+        for (; r > 0; r = enet_host_check_events(m_host, &ev)) {
+            switch (ev.type) {
+                case ENET_EVENT_TYPE_CONNECT:
+                    enet_peer_timeout(ev.peer, 8, 3000, 8000);
+                    detail::send(ev.peer, k_channel_control, encode_hello(m_invite), true);
+                    m_status = Status::Handshake;
+                    break;
+                case ENET_EVENT_TYPE_RECEIVE:
+                    on_receive(ev.packet->data, ev.packet->dataLength, clock());
+                    enet_packet_destroy(ev.packet);
+                    break;
+                case ENET_EVENT_TYPE_DISCONNECT:
+                    // A refused handshake arrives as a disconnect carrying the reason.
+                    m_reject = static_cast<Reject>(ev.data);
+                    m_status = m_reject == Reject::None || m_reject == Reject::ServerQuit ? Status::Lost
+                             : Status::Rejected;
+                    enet_host_destroy(m_host);
+                    m_host    = nullptr;
+                    m_peer    = nullptr;
+                    m_players = {};
+                    return;
+                default:
+                    break;
+            }
+        }
+
+        // Only fresh states go out: while the game is stalled the others see this
+        // player hold still (ENet's own pings keep the link up), not replay a frame.
+        const double t = clock();
+        if (m_status == Status::InSession && m_local_version != m_sent_version && t >= m_next_send) {
+            detail::send(m_peer, k_channel_state, encode_state(++m_seq, m_local), false);
+            m_sent_version = m_local_version;
+            m_next_send += 1.0 / k_send_hz;
+            if (m_next_send < t) m_next_send = t + 1.0 / k_send_hz;
+        }
+        enet_host_flush(m_host);
     }
-    enet_host_flush(m_host);
 }
 
 void Client::on_receive(const uint8_t* data, size_t size, double now)
@@ -174,9 +218,35 @@ void Client::on_receive(const uint8_t* data, size_t size, double now)
         if (!seen[c]) m_players[c] = {};
 }
 
-std::optional<PlayerState> Client::remote(PlayerColor c, double now) const
+Client::Status Client::status() const
 {
-    const History& h = m_players[static_cast<int>(c)];
+    std::lock_guard lock(m_mutex);
+    return m_status;
+}
+
+Reject Client::reject_reason() const
+{
+    std::lock_guard lock(m_mutex);
+    return m_reject;
+}
+
+std::optional<PlayerColor> Client::color() const
+{
+    std::lock_guard lock(m_mutex);
+    return m_color;
+}
+
+uint32_t Client::snapshots() const
+{
+    std::lock_guard lock(m_mutex);
+    return m_snapshots;
+}
+
+std::optional<PlayerState> Client::remote(PlayerColor c, double caller_now) const
+{
+    std::lock_guard lock(m_mutex);
+    const double   now = caller_now - m_caller_offset;   // onto our clock
+    const History& h   = m_players[static_cast<int>(c)];
     if (!h.present || h.count == 0) return std::nullopt;
 
     const double   t     = now + m_clock_offset - k_interp_delay;
@@ -210,6 +280,7 @@ std::optional<PlayerState> Client::remote(PlayerColor c, double now) const
 
 std::string Client::describe() const
 {
+    std::lock_guard lock(m_mutex);
     char buf[160];
     switch (m_status) {
         case Status::Idle:       return "offline";

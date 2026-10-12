@@ -1,5 +1,4 @@
 #include <cmath>
-#include <csignal>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -21,7 +20,7 @@
 #include "ecs/components/physics.h"
 #include "game/player.h"
 #include "net/client.h"
-#include "net/server.h"
+#include "net/dedicated.h"
 #include "physics/collision_world.h"
 #include "physics/rotating_frame.h"
 #include "render/avatar_renderer.h"
@@ -399,38 +398,6 @@ static void update_net(bool world_ready)
     }
 }
 
-static volatile std::sig_atomic_t g_stop_server = 0;
-static void on_stop_signal(int) { g_stop_server = 1; }
-
-// --server: no window, no GPU, no world; just the ledger.
-static int run_server()
-{
-    // Events show up promptly when piped. MSVC has no line buffering and treats
-    // _IOLBF with a zero size as an invalid parameter (abort), so go unbuffered.
-#ifdef _WIN32
-    setvbuf(stdout, nullptr, _IONBF, 0);
-#else
-    setvbuf(stdout, nullptr, _IOLBF, 0);
-#endif
-    const net::Invite invite = net::make_invite();
-    net::Server server;
-    if (!server.start(g_port, invite, stdout)) return 1;
-
-    printf("Eschaton server listening on UDP port %u (up to %d players)\n"
-           "invite code: %s\n"
-           "join with:   eschaton --connect <this-host>:%u %s\n"
-           "Ctrl+C stops the server.\n",
-           unsigned(g_port), net::k_max_players, net::invite_hex(invite).c_str(), unsigned(g_port),
-           net::invite_hex(invite).c_str());
-
-    std::signal(SIGINT, on_stop_signal);
-    std::signal(SIGTERM, on_stop_signal);
-    while (!g_stop_server) server.service(10);
-    printf("shutting down\n");
-    server.stop();
-    return 0;
-}
-
 // -----------------------------------------------------------------------
 // Scene teardown
 // -----------------------------------------------------------------------
@@ -485,12 +452,10 @@ static bool parse_args(int argc, char* argv[])
         } else if (!strcmp(a, "--server")) {
             g_server_mode = true;
         } else if (!strcmp(a, "--port") && i + 1 < argc) {
-            const long p = strtol(argv[++i], nullptr, 10);
-            if (p <= 0 || p > 65535) {
+            if (!net::parse_port(argv[++i], g_port)) {
                 fprintf(stderr, "--port: not a port number: %s\n", argv[i]);
                 return false;
             }
-            g_port = static_cast<uint16_t>(p);
         } else if (!strcmp(a, "--connect") && i + 2 < argc) {
             if (!net::parse_endpoint(argv[++i], g_connect_host, g_connect_port)) {
                 fprintf(stderr, "--connect: expected host or host:port, got %s\n", argv[i]);
@@ -544,7 +509,7 @@ int main(int argc, char* argv[])
     if (!parse_args(argc, argv))
         return 1;
     if (g_server_mode)
-        return run_server();
+        return net::run_dedicated_server(g_port);
     resolve_data_dirs();
 
     // ---------------------------------------------------------------

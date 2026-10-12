@@ -1,5 +1,6 @@
 #include "net/protocol.h"
 
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -102,9 +103,15 @@ bool parse_endpoint(const char* text, std::string& host, uint16_t& port)
         return !host.empty();
     }
     host.assign(text, colon);
-    char* end = nullptr;
-    const long p = std::strtol(colon + 1, &end, 10);
-    if (host.empty() || !end || *end || p <= 0 || p > 65535) return false;
+    return !host.empty() && parse_port(colon + 1, port);
+}
+
+bool parse_port(const char* text, uint16_t& port)
+{
+    const char*   end = text + std::strlen(text);
+    unsigned long p   = 0;
+    const auto    r   = std::from_chars(text, end, p);
+    if (r.ec != std::errc{} || r.ptr != end || p == 0 || p > 65535) return false;
     port = static_cast<uint16_t>(p);
     return true;
 }

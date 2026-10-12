@@ -104,6 +104,10 @@ bool                  invite_equal(const Invite& a, const Invite& b);   // const
 
 // Parses "host", "host:port" (port defaults to k_default_port).
 bool parse_endpoint(const char* text, std::string& host, uint16_t& port);
+// A whole decimal port number, 1-65535. std::from_chars rather than strtol: newer
+// glibc headers redirect strtol to __isoc23_strtol, which alone would raise the
+// dedicated server's glibc requirement to 2.38.
+bool parse_port(const char* text, uint16_t& port);
 
 // Sanity limits on a reported state: finite numbers, inside generous map bounds.
 bool state_plausible(const PlayerState& s);

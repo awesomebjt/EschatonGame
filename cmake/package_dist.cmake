@@ -1,6 +1,7 @@
 # Assembles a self-contained copy of the game (cmake --build build --target dist):
 #
-#   <DIST_DIR>/eschaton             the executable
+#   <DIST_DIR>/eschaton             the game
+#   <DIST_DIR>/eschaton_server      the multiplayer server alone (no window, world or shaders)
 #   <DIST_DIR>/shaders/<backend>/   compiled shaders
 #   <DIST_DIR>/world/               manifest, prototypes and chunks: what load_world reads
 #
@@ -9,7 +10,7 @@
 # with cmake -P; globbing here rather than at configure time picks up a
 # re-export without re-running CMake.
 
-foreach(var EXE SHADER_DIR WORLD_DIR DIST_DIR)
+foreach(var EXE SERVER_EXE SHADER_DIR WORLD_DIR DIST_DIR)
     if(NOT DEFINED ${var})
         message(FATAL_ERROR "package_dist.cmake: ${var} not set")
     endif()
@@ -23,7 +24,7 @@ endif()
 file(REMOVE_RECURSE "${DIST_DIR}")
 file(MAKE_DIRECTORY "${DIST_DIR}/world")
 
-file(COPY "${EXE}" DESTINATION "${DIST_DIR}")
+file(COPY "${EXE}" "${SERVER_EXE}" DESTINATION "${DIST_DIR}")
 file(COPY "${SHADER_DIR}/" DESTINATION "${DIST_DIR}/shaders")
 
 # Only what the game loads; the .blend, height map and map tiles stay behind.

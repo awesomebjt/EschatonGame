@@ -230,6 +230,7 @@ add_executable(eschaton
     src/debug/console.cpp
     src/game/player.cpp
     src/net/client.cpp
+    src/net/dedicated.cpp
     src/net/protocol.cpp
     src/net/server.cpp
     src/physics/character.cpp
@@ -279,6 +280,32 @@ target_include_directories(eschaton PRIVATE
 )
 
 # ---------------------------------------------------------------------------
+# eschaton_server: the multiplayer server alone (same as `eschaton --server`),
+# without SDL, bgfx, mruby or the world, so it runs on a bare headless machine.
+# ---------------------------------------------------------------------------
+add_executable(eschaton_server
+    src/server_main.cpp
+    src/net/dedicated.cpp
+    src/net/protocol.cpp
+    src/net/server.cpp
+)
+target_include_directories(eschaton_server PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(eschaton_server PRIVATE enet)
+target_compile_options(eschaton_server PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /utf-8>
+)
+# Bundle the C++ runtime where the toolchain can (it needs libstdc++.a; Fedora
+# ships it separately as libstdc++-static), leaving only glibc as a dependency.
+if(NOT MSVC)
+    include(CheckLinkerFlag)
+    check_linker_flag(CXX "-static-libstdc++" HAVE_STATIC_LIBSTDCXX)
+    if(HAVE_STATIC_LIBSTDCXX)
+        target_link_options(eschaton_server PRIVATE -static-libstdc++ -static-libgcc)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Headless physics checks against the exported world (no window or GPU)
 # ---------------------------------------------------------------------------
 add_executable(physics_check EXCLUDE_FROM_ALL
@@ -317,11 +344,12 @@ set(DIST_DIR ${CMAKE_BINARY_DIR}/dist/eschaton)
 add_custom_target(dist
     COMMAND ${CMAKE_COMMAND}
             -DEXE=$<TARGET_FILE:eschaton>
+            -DSERVER_EXE=$<TARGET_FILE:eschaton_server>
             -DSHADER_DIR=${SHADER_OUTPUT_DIR}
             -DWORLD_DIR=${CMAKE_SOURCE_DIR}/world
             -DDIST_DIR=${DIST_DIR}
             -P ${CMAKE_SOURCE_DIR}/cmake/package_dist.cmake
-    DEPENDS eschaton compile_shaders
+    DEPENDS eschaton eschaton_server compile_shaders
     COMMENT "Packaging the game into ${DIST_DIR}"
     VERBATIM
 )
